@@ -44,7 +44,11 @@ def load_missing_summary() -> dict:
     blocks = scan_missing(date(2016, 1, 1), date.today())
     rows = sum(len(m) for _, m in blocks)
     first_day = blocks[0][0].isoformat() if blocks else None
-    return {"days": len(blocks), "rows": rows, "first_day": first_day}
+    from data.incremental import scan_missing_stocks
+
+    stock_jobs = scan_missing_stocks(date(2016, 1, 1), date.today())
+    stock_rows = sum((e - s).days + 1 for _, rngs in stock_jobs for s, e in rngs)
+    return {"days": len(blocks), "rows": rows, "first_day": first_day, "stocks": len(stock_jobs), "stock_rows": stock_rows}
 
 
 # ---------- 调度（APScheduler 单例） ----------
@@ -152,10 +156,13 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("覆盖交易日", f"{stats.get('covered_days', 0)} 天")
 c2.metric("数据范围", f"{stats.get('first_day')} ~ {stats.get('last_day')}")
 c3.metric("覆盖数据量", f"{stats.get('covered_cells', 0):,} 行")
-c4.metric("尚未对齐", f"{missing.get('days', 0)} 天 / {missing.get('rows', 0):,} 只")
+c4.metric("尚未对齐", f"{missing.get('stocks', 0)} 只 / {missing.get('rows', 0):,} 行")
 
 if missing.get("first_day"):
-    st.caption(f"最早缺失截面：{missing['first_day']}（点击上方任务按钮开始补齐）")
+    st.caption(
+        f"未对齐：{missing.get('stocks', 0)} 只股票（截面口径 {missing.get('days', 0)} 天 / "
+        f"{missing.get('rows', 0):,} 行）· 最早缺失截面 {missing['first_day']}（点击上方任务按钮开始补齐）"
+    )
 
 
 # ---------- 动态进度（fragment 轮询） ----------
@@ -167,8 +174,12 @@ def show_progress() -> None:
         st.progress(min(float(s.get("percent", 0.0)), 1.0))
         p1, p2, p3, p4 = st.columns(4)
         p1.metric("任务", s.get("task"))
-        p2.metric("当前日期", s.get("current_day") or "-")
-        p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 天")
+        if s.get("mode") == "stock":
+            p2.metric("当前股票", s.get("current") or "-")
+            p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 只")
+        else:
+            p2.metric("当前日期", s.get("current") or "-")
+            p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 天")
         p4.metric("已补行数", f"{s.get('filled_rows', 0):,}")
         if s.get("failed_count"):
             st.caption(f"本次未获取 {s.get('failed_count')} 只（自动重试，连续 3 次标记为疑似停牌）")

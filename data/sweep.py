@@ -1,7 +1,7 @@
-"""市场扫描：全量对齐（先扫描本地，只补缺失，避免重复抓取）。
+"""市场扫描：全量对齐（按股票逐个抓取，先扫描本地只补缺失）。
 
-与截面增量共用 data.incremental.align 核心，区别仅在起始日期语义：
-市场扫描默认从 2016-01-01 起全量对齐到最新。
+市场扫描按"股票维度"对齐：每只股票计算 2016 至今缺失的日期区间，
+合并连续区间后整段拉取（与截面增量的按天维度不同）。
 用法：python -m data.sweep [--start 2016-01-01]
 """
 
@@ -14,7 +14,7 @@ from typing import Callable
 
 from dotenv import load_dotenv
 
-from data.incremental import align
+from data.incremental import align_by_stock
 
 
 def sweep(
@@ -24,9 +24,9 @@ def sweep(
     progress_cb: Callable[[dict], None] | None = None,
     stop_event: Callable[[], bool] | None = None,
 ) -> dict:
-    """市场扫描：从 start 起全量对齐（只补缺失）。"""
-    print(f"[sweep] 市场扫描 {start} ~ {end}（先扫描本地，只补缺失）", flush=True)
-    return align(start, end, max_days=max_days, progress_cb=progress_cb, stop_event=stop_event)
+    """市场扫描：按股票逐个对齐（只补缺失）。"""
+    print(f"[sweep] 市场扫描 {start} ~ {end}（按股票逐个，只补缺失）", flush=True)
+    return align_by_stock(start, end, progress_cb=progress_cb, stop_event=stop_event)
 
 
 def main() -> None:

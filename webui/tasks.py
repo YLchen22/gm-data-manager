@@ -35,16 +35,25 @@ def _append_log(line: str) -> None:
 
 
 def get_status() -> dict:
+    data: dict = {"task": None, "running": False, "message": "暂无任务"}
     if STATUS_PATH.exists():
         try:
-            return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+            data = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"task": None, "running": False, "message": "暂无任务"}
+    with _lock:
+        th = _state.get("thread")
+        alive = th is not None and th.is_alive()
+    # 文件标记 running 但当前进程无活动线程 → 上次任务被中断（如进程退出/重启）
+    if data.get("running") and not alive:
+        data = {**data, "running": False, "message": "上次任务被中断"}
+    return data
 
 
 def is_running() -> bool:
-    return bool(get_status().get("running"))
+    with _lock:
+        th = _state.get("thread")
+        return th is not None and th.is_alive()
 
 
 def stop_task() -> dict:

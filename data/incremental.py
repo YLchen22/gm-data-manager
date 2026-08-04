@@ -1,23 +1,21 @@
-"""截面增量 / 市场对齐：按交易日检查覆盖，补齐缺失截面。
+"""数据对齐：市场全量（按股票）与截面增量（按天）。
 
-两种任务共用同一核心（先扫描本地覆盖，只补缺失，避免重复抓取）：
-- 截面增量：日常维护，从最早缺失日补齐；
-- 市场扫描：全量对齐（默认 2016 起），语义与截面增量一致。
+两种任务都遵循"先扫描本地覆盖，只补缺失，避免重复抓取"：
+- 市场全量（align_by_stock）：按股票逐个对齐——每只股票计算 2016 至今缺失的日期区间，
+  合并连续区间后整段拉取（股票维度完整性）；
+- 截面增量（align）：按交易日对齐——每天计算有效性集合（已上市未退市）− 已覆盖集合，
+  拉取该日缺失的股票（日期维度完整性）。
 
-核心逻辑：
-1. 交易日历 → 对每个交易日计算"有效性集合"（已上市未退市）− "已覆盖集合" = 缺失；
-2. 按缺失 symbol 拉取该日截面（单日全市场约 1.4s）；
-3. 拉不到的 (date, symbol) 记入 suspect，连续 3 次后标记为疑似停牌，移出自动补缺。
-
+拉不到的 (date, symbol) 记入 suspect，连续 3 次后标记为疑似停牌，移出自动补缺。
 WebUI 通过 progress_cb / stop_event 驱动动态进度条与停止操作。
-用法：python -m data.incremental [--start 2016-01-01] [--max-days 0]
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date
+from bisect import bisect_left, bisect_right
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -91,6 +89,56 @@ def scan_missing(start: date, end: date) -> list[tuple[date, set[str]]]:
     return _missing_blocks(store, assets, start, end)
 
 
+def _merge_trading_ranges(missing: list[date], trading_days: list[date]) -> list[tuple[date, date]]:
+    """把缺失日期按"交易日连续"合并成区间段。"""
+    idx = {d: i for i, d in enumerate(trading_days)}
+    missing = sorted(missing)
+    ranges: list[tuple[date, date]] = []
+    seg_start = seg_end = missing[0]
+    for d in missing[1:]:
+        if idx.get(d) == idx.get(seg_end, -1) + 1:
+            seg_end = d
+        else:
+            ranges.append((seg_start, seg_end))
+            seg_start = seg_end = d
+    ranges.append((seg_start, seg_end))
+    return ranges
+
+
+def _missing_ranges_by_stock(
+    store: Store, assets: pd.DataFrame, trading_days: list[date], start: date, end: date
+) -> list[tuple[str, list[tuple[date, date]]]]:
+    """每只股票 2016 至今缺失的日期区间（按股票维度）。"""
+    covered = store.coverage("stock")
+    covered_by_symbol: dict[str, set[date]] = {}
+    if not covered.empty:
+        for sym, g in covered.groupby("symbol"):
+            covered_by_symbol[sym] = set(g["date"].dt.date)
+
+    result: list[tuple[str, list[tuple[date, date]]]] = []
+    for sym, listed, delisted in assets[["symbol", "listed_date", "delisted_date"]].itertuples(index=False):
+        lo = bisect_left(trading_days, max(listed, start))
+        hi = bisect_right(trading_days, min(delisted, end))
+        valid = trading_days[lo:hi]
+        if not valid:
+            continue
+        have = covered_by_symbol.get(sym, set())
+        missing = sorted(set(valid) - have)
+        if not missing:
+            continue
+        result.append((sym, _merge_trading_ranges(missing, trading_days)))
+    return result
+
+
+def scan_missing_stocks(start: date, end: date) -> list[tuple[str, list[tuple[date, date]]]]:
+    """只扫描本地覆盖，不拉取：返回 [(股票, 缺失日期区间段)]，供市场全量任务使用。"""
+    store = Store()
+    source = GmDataSource()
+    assets = load_assets(source)
+    trading_days = [date.fromisoformat(d) for d in source.trading_dates(start, end)]
+    return _missing_ranges_by_stock(store, assets, trading_days, start, end)
+
+
 def align(
     start: date,
     end: date,
@@ -125,7 +173,8 @@ def align(
         if progress_cb is not None:
             progress_cb(
                 {
-                    "current_day": d.isoformat(),
+                    "mode": "section",
+                    "current": d.isoformat(),
                     "done_days": idx + 1,
                     "total_days": total,
                     "missing_count": len(missing),
@@ -145,11 +194,75 @@ def align(
         "filled_rows": filled_rows,
         "failed": len(failed),
         "stopped": stopped,
+        "mode": "section",
+    }
+
+
+def align_by_stock(
+    start: date,
+    end: date,
+    progress_cb: ProgressCB | None = None,
+    stop_event: StopCheck | None = None,
+) -> dict:
+    """市场全量：按股票逐个对齐（每只股票 2016 至今的缺失区间）。"""
+    store = Store()
+    source = GmDataSource()
+    assets = load_assets(source)
+    trading_days = [date.fromisoformat(d) for d in source.trading_dates(start, end)]
+    jobs = _missing_ranges_by_stock(store, assets, trading_days, start, end)
+    total = len(jobs)
+    filled_rows = 0
+    failed: list[tuple[date, str]] = []
+    stopped = False
+    for idx, (sym, ranges) in enumerate(jobs):
+        if stop_event is not None and stop_event():
+            stopped = True
+            break
+        sym_filled = 0
+        for rs, re_ in ranges:
+            df = source.bars([sym], rs, re_)
+            got = set(df["symbol"]) if df is not None and not df.empty else set()
+            if got:
+                store.write_bars("stock", df)
+                store.write_coverage("stock", df)
+                sym_filled += len(df)
+            if sym not in got:
+                # 该股票整段缺失未返回（停牌/无数据），逐日记 suspect
+                d = rs
+                while d <= re_:
+                    failed.append((d, sym))
+                    d += timedelta(days=1)
+        filled_rows += sym_filled
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "mode": "stock",
+                    "current": sym,
+                    "done_days": idx + 1,
+                    "total_days": total,
+                    "missing_count": len(ranges),
+                    "filled_count": sym_filled,
+                    "filled_rows": filled_rows,
+                    "failed_count": len(failed),
+                    "percent": (idx + 1) / total if total else 1.0,
+                }
+            )
+        print(f"[stock] {idx + 1}/{total} {sym} 缺失 {len(ranges)} 段，补齐 {sym_filled} 行", flush=True)
+
+    if failed:
+        _update_suspect(failed)
+    print(f"[stock] 完成：处理 {total} 只股票，补齐 {filled_rows} 行，失败 {len(failed)} 条", flush=True)
+    return {
+        "checked_days": total,
+        "filled_rows": filled_rows,
+        "failed": len(failed),
+        "stopped": stopped,
+        "mode": "stock",
     }
 
 
 def incremental(start: date, end: date, max_days: int = 0) -> dict:
-    """截面增量（命令行/调度入口）：语义与 align 一致。"""
+    """截面增量（命令行/调度入口）：按天对齐。"""
     return align(start, end, max_days=max_days)
 
 
