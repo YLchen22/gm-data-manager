@@ -1,5 +1,14 @@
 # 开发日志
 
+## 数据服务：存储重构 + 市场扫描/截面增量 + WebUI（2026-08-04）
+- 存储布局：一股票一文件 → 按「资产类别/年份」分区大文件（bars/stock/2016.parquet…）+ 覆盖清单（coverage/stock/*.parquet）；完整性检查只查清单，不碰物理文件；增量写入只动当年文件。
+- 迁移：旧缓存 541 万行（3048 文件）本地合并进新布局；抽查新旧数据一致（close 差异 0）；旧文件已移入回收站（可恢复）。
+- 对齐逻辑：市场扫描与截面增量共用 align 核心——先扫描本地覆盖（有效性集合=上市/退市日期），只补缺失截面，避免重复抓取；单日全市场拉取约 1.4s；拉不到的记 suspect，连续 3 次标记为疑似停牌移出自动补缺。
+- 技术探测结论：单日全市场调用可行；停牌日 gm 直接缺行（skip_suspended 参数无效）；B 股（200/201/900）需排除，全 A 股实际 5011 只；历史交易状态接口（get_history_instruments 等）当前 token 需更高权限，改用"重试仍无→疑似停牌"兜底。
+- 掘金官方限流确认（FAQ + SDK 文档）：行情接口不在分钟/每日限流表内（实际约束为单次查询 16MB 上限，错误码 1029）；数据包接口 5min/1000 次、24h/5 万次封顶；触发流控时 SDK 自动冷却，默认最长 1 小时（set_option max_wait_time 可调）。
+- WebUI（Streamlit + APScheduler）：按钮触发市场扫描/截面增量，动态进度条（fragment 轮询 + 任务状态文件 task_status.json）；页面先扫描展示"尚未对齐"统计；工作日定时调度可配置（config/scheduler.json）；任务日志 data/cache/status/task.log。
+- 待用户操作：在 WebUI 点击任务按钮完成 2023–2026 剩余对齐（扫描显示约 191 万行缺失，含当日未拉取数据）。
+
 ## Phase 0 工程与数据基座完成（2026-08-04）
 - 环境：选定 Python 3.10.6（64 位）venv（3.14 过新、gm 支持区间 3.6+）；依赖 numpy/pandas 1.5.3/pyarrow/pyyaml/pytest/gm 3.0.186；pytest 5 用例通过。
 - 工程骨架：git init（main 分支）；11 目录 + pyproject.toml + .gitignore（.venv/.env/data/cache/.idea 不入库）。

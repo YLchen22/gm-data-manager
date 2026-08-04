@@ -1,0 +1,194 @@
+"""CYQUANT 数据服务 WebUI（Streamlit + APScheduler）。
+
+功能：
+- 市场扫描 / 截面增量：按钮触发，动态进度条（fragment 自动轮询）；
+- 数据状态：覆盖天数、范围、未对齐统计（先扫描本地，避免重复抓取）；
+- 自动调度：工作日定时截面增量（配置持久化到 config/scheduler.json）。
+
+启动：streamlit run webui/app.py
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from datetime import date, time as dtime
+from pathlib import Path
+
+import streamlit as st
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+load_dotenv(PROJECT_ROOT / ".env")
+
+from webui.tasks import get_status, is_running, start_task, stop_task  # noqa: E402
+
+ASSET = "stock"
+SCHEDULE_PATH = PROJECT_ROOT / "config" / "scheduler.json"
+
+
+# ---------- 数据状态（缓存 5 分钟，避免每次交互重扫） ----------
+@st.cache_data(ttl=300, show_spinner=False)
+def load_data_stats() -> dict:
+    from data.store import Store
+
+    return Store().stats(ASSET)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_missing_summary() -> dict:
+    """扫描本地覆盖，统计尚未对齐的截面（先扫描、只补缺失的前提）。"""
+    from data.incremental import scan_missing
+
+    blocks = scan_missing(date(2016, 1, 1), date.today())
+    rows = sum(len(m) for _, m in blocks)
+    first_day = blocks[0][0].isoformat() if blocks else None
+    return {"days": len(blocks), "rows": rows, "first_day": first_day}
+
+
+# ---------- 调度（APScheduler 单例） ----------
+_scheduler = None
+_applied_schedule: tuple | None = None
+
+
+def _get_scheduler():
+    global _scheduler
+    if _scheduler is None:
+        from apscheduler.schedulers.background import BackgroundScheduler
+
+        _scheduler = BackgroundScheduler()
+        _scheduler.start()
+    return _scheduler
+
+
+def _run_scheduled() -> None:
+    start_task("截面增量", ASSET, date(2016, 1, 1), date.today(), max_days=0)
+
+
+def apply_schedule(enabled: bool, hour: int, minute: int) -> None:
+    global _applied_schedule
+    key = (enabled, hour, minute)
+    if key == _applied_schedule:
+        return
+    sched = _get_scheduler()
+    if sched.get_job("daily_incremental"):
+        sched.remove_job("daily_incremental")
+    if enabled:
+        sched.add_job(
+            _run_scheduled,
+            "cron",
+            day_of_week="mon-fri",
+            hour=hour,
+            minute=minute,
+            id="daily_incremental",
+            misfire_grace_time=3600,
+        )
+    _applied_schedule = key
+
+
+def load_schedule() -> dict:
+    if SCHEDULE_PATH.exists():
+        try:
+            return json.loads(SCHEDULE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"enabled": False, "hour": 17, "minute": 0}
+
+
+def save_schedule(data: dict) -> None:
+    SCHEDULE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------- 页面 ----------
+st.set_page_config(page_title="CYQUANT 数据服务", page_icon="📊", layout="wide")
+st.title("CYQUANT 数据服务")
+st.caption(f"资产类别：{ASSET} · 数据范围：2016-01-01 至今")
+
+running = is_running()
+status = get_status()
+
+# ---------- 侧边栏：任务控制 ----------
+with st.sidebar:
+    st.header("任务控制")
+    st.caption("任务由你手动点击触发，进度实时显示在主区。")
+    if running:
+        st.warning(f"运行中：{status.get('task')}")
+    else:
+        st.info("空闲")
+
+    if st.button("🚀 市场扫描（全量对齐）", disabled=running, use_container_width=True):
+        r = start_task("市场扫描", ASSET, date(2016, 1, 1), date.today(), max_days=0)
+        st.toast("已启动" if r.get("ok") else f"启动失败：{r.get('error')}")
+    if st.button("⚡ 截面增量（日常）", disabled=running, use_container_width=True):
+        r = start_task("截面增量", ASSET, date(2016, 1, 1), date.today(), max_days=0)
+        st.toast("已启动" if r.get("ok") else f"启动失败：{r.get('error')}")
+    if running:
+        if st.button("⏹ 停止", use_container_width=True):
+            stop_task()
+
+    st.divider()
+    st.header("自动调度")
+    settings = load_schedule()
+    enabled = st.toggle("启用工作日自动截面增量", value=bool(settings["enabled"]))
+    t = st.time_input("运行时间", dtime(settings["hour"], settings["minute"]))
+    if st.button("保存调度设置", use_container_width=True):
+        save_schedule({"enabled": bool(enabled), "hour": t.hour, "minute": t.minute})
+        apply_schedule(bool(enabled), t.hour, t.minute)
+        st.toast("调度设置已保存并生效")
+
+# 页面加载即应用持久化的调度设置（避免重复注册）
+apply_schedule(bool(settings["enabled"]), settings["hour"], settings["minute"])
+
+# ---------- 主区：数据状态 ----------
+try:
+    stats = load_data_stats()
+    missing = load_missing_summary()
+except Exception as e:
+    st.error(f"数据状态加载失败：{e}")
+    stats, missing = {}, {}
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("覆盖交易日", f"{stats.get('covered_days', 0)} 天")
+c2.metric("数据范围", f"{stats.get('first_day')} ~ {stats.get('last_day')}")
+c3.metric("覆盖数据量", f"{stats.get('covered_cells', 0):,} 行")
+c4.metric("尚未对齐", f"{missing.get('days', 0)} 天 / {missing.get('rows', 0):,} 只")
+
+if missing.get("first_day"):
+    st.caption(f"最早缺失截面：{missing['first_day']}（点击上方任务按钮开始补齐）")
+
+
+# ---------- 动态进度（fragment 轮询） ----------
+@st.fragment(run_every=2.0)
+def show_progress() -> None:
+    s = get_status()
+    if s.get("running"):
+        st.subheader("任务进度")
+        st.progress(min(float(s.get("percent", 0.0)), 1.0))
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("任务", s.get("task"))
+        p2.metric("当前日期", s.get("current_day") or "-")
+        p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 天")
+        p4.metric("已补行数", f"{s.get('filled_rows', 0):,}")
+        if s.get("failed_count"):
+            st.caption(f"本次未获取 {s.get('failed_count')} 只（自动重试，连续 3 次标记为疑似停牌）")
+    elif s.get("result") is not None or s.get("error"):
+        st.subheader("最近任务结果")
+        if s.get("error"):
+            st.error(f"出错：{s.get('error')}")
+        else:
+            r = s.get("result") or {}
+            note = "（已停止）" if r.get("stopped") else ""
+            st.success(f"{s.get('message')}{note}：检查 {r.get('checked_days', 0)} 天，补齐 {r.get('filled_rows', 0)} 行")
+
+
+show_progress()
+
+# ---------- 任务日志 ----------
+st.subheader("任务日志")
+log_path = PROJECT_ROOT / "data" / "cache" / "status" / "task.log"
+if log_path.exists():
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    st.code("\n".join(lines[-20:]), language="text")
+else:
+    st.caption("暂无日志（任务尚未运行）")
