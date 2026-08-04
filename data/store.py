@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 from typing import Sequence
@@ -70,7 +71,11 @@ class Store:
             merged = new
         merged = merged.drop_duplicates(subset=subset, keep="last")
         merged = merged.sort_values(subset).reset_index(drop=True)
-        merged.to_parquet(path, index=False)
+        # 原子写入：先写临时文件再替换，避免并发进程读到半截文件导致损坏
+        # （并发"读-合并-写"仍可能丢失最后写入的部分行，但补缺任务幂等，下次扫描会补回）
+        tmp = path.with_name(path.name + ".tmp")
+        merged.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
 
     # ---- 读取 ----
     def read_bars(

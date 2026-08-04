@@ -66,7 +66,9 @@ def _missing_blocks(store: Store, assets: pd.DataFrame, start: date, end: date) 
     suspect = _load_suspect()
     blocked: set[tuple[date, str]] = set()
     if not suspect.empty:
-        blocked = set(zip(pd.to_datetime(suspect["date"]).dt.date, suspect["symbol"]))
+        # 只排除已确认"疑似停牌"的记录；retry 状态继续重试（attempts 递增至 3 后转 suspended）
+        sus_active = suspect[suspect["status"] == "suspended"]
+        blocked = set(zip(pd.to_datetime(sus_active["date"]).dt.date, sus_active["symbol"]))
 
     blocks = []
     for d in trading_days:

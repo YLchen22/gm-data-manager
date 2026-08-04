@@ -182,7 +182,10 @@ def show_progress() -> None:
             p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 天")
         p4.metric("已补行数", f"{s.get('filled_rows', 0):,}")
         if s.get("failed_count"):
-            st.caption(f"本次未获取 {s.get('failed_count')} 只（自动重试，连续 3 次标记为疑似停牌）")
+            st.caption(
+                f"差额说明：本次未获取 {s.get('failed_count')} 条（通常为当日停牌/无数据，"
+                "gm 不返回停牌日行情；自动重试，连续 3 次后标记为疑似停牌不再计入缺失）"
+            )
     elif s.get("result") is not None or s.get("error"):
         st.subheader("最近任务结果")
         if s.get("error"):
