@@ -107,7 +107,10 @@ def save_schedule(data: dict) -> None:
 # ---------- 页面 ----------
 st.set_page_config(page_title="CYQUANT 数据服务", page_icon="📊", layout="wide")
 st.title("CYQUANT 数据服务")
-st.caption(f"资产类别：{ASSET} · 数据范围：2016-01-01 至今")
+st.caption(
+    f"资产类别：{ASSET} · 数据范围：2016-01-01 至今 · "
+    "覆盖当前存续全 A 股 5011 只（主板/创业板/科创板）；历史退市股数据需更高掘金数据权限"
+)
 
 running = is_running()
 status = get_status()

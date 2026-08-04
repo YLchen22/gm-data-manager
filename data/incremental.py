@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 from bisect import bisect_left, bisect_right
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Callable
 
@@ -28,6 +28,7 @@ from data.store import Store
 
 SUSPECT_PATH = Path(__file__).resolve().parent / "cache" / "status" / "suspect.parquet"
 MAX_ATTEMPTS = 3
+REVIEW_DAYS = 30  # suspended 记录超过该天数后重新验证一次（防 gm 数据补齐后永久漏抓）
 
 ProgressCB = Callable[[dict], None]
 StopCheck = Callable[[], bool]
@@ -35,8 +36,11 @@ StopCheck = Callable[[], bool]
 
 def _load_suspect() -> pd.DataFrame:
     if not SUSPECT_PATH.exists():
-        return pd.DataFrame(columns=["date", "symbol", "attempts", "status"])
-    return pd.read_parquet(SUSPECT_PATH)
+        return pd.DataFrame(columns=["date", "symbol", "attempts", "status", "last_seen"])
+    df = pd.read_parquet(SUSPECT_PATH)
+    if "last_seen" not in df.columns:
+        df["last_seen"] = pd.NaT
+    return df
 
 
 def _save_suspect(df: pd.DataFrame) -> None:
@@ -47,18 +51,39 @@ def _save_suspect(df: pd.DataFrame) -> None:
 def _update_suspect(failed: list[tuple[date, str]]) -> None:
     """拉取失败的 (date, symbol) 累计尝试次数；满 MAX_ATTEMPTS 标记 suspended。"""
     df = _load_suspect()
-    now = pd.DataFrame({"date": [pd.Timestamp(d) for d, _ in failed], "symbol": [s for _, s in failed]})
-    merged = pd.concat([df, now.assign(attempts=1, status="retry")], ignore_index=True)
+    now = pd.Timestamp.now()
+    now_df = pd.DataFrame(
+        {
+            "date": [pd.Timestamp(d) for d, _ in failed],
+            "symbol": [s for _, s in failed],
+            "attempts": 1,
+            "status": "retry",
+            "last_seen": now,
+        }
+    )
+    merged = pd.concat([df, now_df], ignore_index=True)
     merged["date"] = pd.to_datetime(merged["date"])
     grp = merged.groupby(["date", "symbol"], as_index=False).agg(
-        attempts=("attempts", "sum"), status=("status", "last")
+        attempts=("attempts", "sum"), status=("status", "last"), last_seen=("last_seen", "last")
     )
     grp.loc[grp["attempts"] >= MAX_ATTEMPTS, "status"] = "suspended"
     _save_suspect(grp)
 
 
+def _review_suspect() -> None:
+    """删除超过 REVIEW_DAYS 的 suspended 记录，使其重新验证（自愈机制）。"""
+    df = _load_suspect()
+    if df.empty or df["last_seen"].isna().all():
+        return
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=REVIEW_DAYS)
+    keep = df[~((df["status"] == "suspended") & (pd.to_datetime(df["last_seen"]) < cutoff))]
+    if len(keep) < len(df):
+        _save_suspect(keep)
+
+
 def _missing_blocks(store: Store, assets: pd.DataFrame, start: date, end: date) -> list[tuple[date, set[str]]]:
     """计算每个交易日的缺失 symbol 集合。"""
+    _review_suspect()
     source = GmDataSource()
     trading_days = source.trading_dates(start, end)
     trading_days = [date.fromisoformat(d) for d in trading_days]
@@ -111,6 +136,7 @@ def _missing_ranges_by_stock(
     store: Store, assets: pd.DataFrame, trading_days: list[date], start: date, end: date
 ) -> list[tuple[str, list[tuple[date, date]]]]:
     """每只股票 2016 至今缺失的日期区间（按股票维度）。"""
+    _review_suspect()
     covered = store.coverage("stock")
     covered_by_symbol: dict[str, set[date]] = {}
     if not covered.empty:
@@ -223,17 +249,15 @@ def align_by_stock(
         sym_filled = 0
         for rs, re_ in ranges:
             df = source.bars([sym], rs, re_)
-            got = set(df["symbol"]) if df is not None and not df.empty else set()
-            if got:
+            got_days = set(pd.to_datetime(df["date"]).dt.date) if df is not None and not df.empty else set()
+            if got_days:
                 store.write_bars("stock", df)
                 store.write_coverage("stock", df)
                 sym_filled += len(df)
-            if sym not in got:
-                # 该股票整段缺失未返回（停牌/无数据），逐日记 suspect
-                d = rs
-                while d <= re_:
+            # 用交易日精确对比：部分成功时，段内未返回的交易日（停牌/无数据）也要记 failed
+            for d in trading_days:
+                if rs <= d <= re_ and d not in got_days:
                     failed.append((d, sym))
-                    d += timedelta(days=1)
         filled_rows += sym_filled
         if progress_cb is not None:
             progress_cb(
