@@ -24,10 +24,12 @@ def is_st(sec_name: str) -> bool:
 
 
 def static_universe(hub: DataHub, cfg: UniverseConfig, ref_date: date) -> pd.DataFrame:
-    """静态过滤：主板 + 非 ST + 上市满 min_listing_days 交易日 + 当前未停牌。"""
+    """静态过滤：主板 + 非 ST + 上市满 min_listing_days 交易日 + 当前未停牌 + 未退市。"""
     ins = hub.source.instruments()
     ins = ins[ins["symbol"].map(is_mainboard)].copy()
     ins = ins[~ins["sec_name"].map(is_st)]
+    # 全历史股票池含退市股，策略池须按 ref_date 剔除已退市标的（delisted_date=2038 表示存续）
+    ins = ins[pd.to_datetime(ins["delisted_date"]) >= pd.Timestamp(ref_date)]
     td = hub.source.trading_dates(date(2010, 1, 1), ref_date)
     min_listed = pd.Timestamp(td[-cfg.min_listing_days] if len(td) > cfg.min_listing_days else td[0])
     ins = ins[pd.to_datetime(ins["listed_date"]) <= min_listed]

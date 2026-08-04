@@ -12,7 +12,7 @@ from typing import Sequence
 import pandas as pd
 from gm.api import (
     get_dividend,
-    get_instruments,
+    get_symbols,
     get_trading_dates,
     history as gm_history,
     set_token,
@@ -75,9 +75,22 @@ class GmDataSource(DataSource):
 
     # ---- 辅助 ----
     def instruments(self) -> pd.DataFrame:
-        """沪深全部 A 股静态信息（含各板块，供股票池过滤）。"""
-        df = get_instruments(exchanges=["SHSE", "SZSE"], sec_types=1, df=True)
-        df["listed_date"] = _to_date_series(df["listed_date"])
+        """沪深全部 A 股静态信息（含全部历史退市股，供股票池过滤）。
+
+        用 get_symbols 而非 get_instruments：后者只返回存续股 + 少量保留退市股，
+        会漏掉乐视(300104)等 2019–2024 退市潮股票；get_symbols 全量 5542 只
+        （含 2002 年退市的 PT金田A 等老案例），delisted_date=2038-01-01 表示存续。
+        """
+        df = get_symbols(
+            sec_type1=1010,
+            sec_type2=101001,
+            skip_suspended=False,
+            skip_st=False,
+            df=True,
+        )
+        for col in ("listed_date", "delisted_date"):
+            if col in df.columns:
+                df[col] = _to_date_series(df[col])
         return df
 
     def trading_dates(self, start: date, end: date) -> list[str]:

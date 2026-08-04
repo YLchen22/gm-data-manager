@@ -109,8 +109,7 @@ st.set_page_config(page_title="CYQUANT 数据服务", page_icon="📊", layout="
 st.title("CYQUANT 数据服务")
 st.caption(
     f"资产类别：{ASSET} · 数据范围：2016-01-01 至今 · "
-    "覆盖当前存续全 A 股 5011 只 + 掘金数据源保留的退市股；"
-    "掘金未覆盖 2019–2024 大部分退市股（乐视/康美等），如需完整退市股数据需引入补充数据源"
+    "股票池：沪深全 A 股（主板/创业板/科创板，含全部历史退市股），先扫描本地只补缺失"
 )
 
 running = is_running()

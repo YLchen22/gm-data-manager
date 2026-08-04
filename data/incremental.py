@@ -143,6 +143,14 @@ def _missing_ranges_by_stock(
         for sym, g in covered.groupby("symbol"):
             covered_by_symbol[sym] = set(g["date"].dt.date)
 
+    # 与截面增量一致：已确认"疑似停牌"的 (date, symbol) 不再计入缺失，
+    # 否则长期停牌/退市股的停牌日会在每次全量扫描中反复空拉（REVIEW_DAYS 到期自动复核）
+    suspect = _load_suspect()
+    blocked: set[tuple[date, str]] = set()
+    if not suspect.empty:
+        sus_active = suspect[suspect["status"] == "suspended"]
+        blocked = set(zip(pd.to_datetime(sus_active["date"]).dt.date, sus_active["symbol"]))
+
     result: list[tuple[str, list[tuple[date, date]]]] = []
     for sym, listed, delisted in assets[["symbol", "listed_date", "delisted_date"]].itertuples(index=False):
         lo = bisect_left(trading_days, max(listed, start))
@@ -151,7 +159,7 @@ def _missing_ranges_by_stock(
         if not valid:
             continue
         have = covered_by_symbol.get(sym, set())
-        missing = sorted(set(valid) - have)
+        missing = [d for d in valid if d not in have and (d, sym) not in blocked]
         if not missing:
             continue
         result.append((sym, _merge_trading_ranges(missing, trading_days)))
