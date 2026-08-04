@@ -1,0 +1,6 @@
+# 统计预警参数（第二层，回撤还小时触发；数值全部待标定）
+ic_ewma_lambda: 0.94             # IC 衰退监控 EWMA 平滑系数
+cusum_k: 0.5                     # CUSUM 可容忍漂移（σ 单位）
+cusum_h: 5.0                     # CUSUM 报警阈值
+var_confidence: 0.95             # VaR/CVaR 置信水平
+vol_ratio_threshold: 2.0         # 已实现/预期波动率突变比

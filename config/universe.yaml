@@ -1,0 +1,5 @@
+# 股票池参数（沪深主板）
+min_listing_days: 60             # 剔除上市不足 60 日
+suspension_days_limit: 5         # 近 N 日停牌超过剔除（待标定）
+liquidity_drop_pct: 0.10         # 剔除流动性后 10%
+# 主板范围：SH 60xxxx / SZ 000、001；排除 300/688/8xx/4xx 与 ST（在代码中实现规则）

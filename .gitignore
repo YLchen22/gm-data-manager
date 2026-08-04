@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 数据缓存（不提交原始数据）
+data/cache/
+data/raw/
+*.parquet
+*.feather
+
+# 密钥（token 绝不提交）
+.env
+*.token
+*.pem
