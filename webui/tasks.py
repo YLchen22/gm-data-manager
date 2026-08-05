@@ -123,6 +123,10 @@ def _run_task(
             from data.sweep import sweep
 
             result = sweep(start, end, max_days=max_days, progress_cb=cb, stop_event=stop_event.is_set)
+        elif task_name == "重建覆盖清单":
+            from data.rebuild import rebuild_coverage
+
+            result = rebuild_coverage(asset=asset, progress_cb=cb, stop_event=stop_event.is_set)
         else:
             from data.incremental import align
 

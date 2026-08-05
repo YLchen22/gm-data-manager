@@ -130,6 +130,9 @@ with st.sidebar:
     if st.button("⚡ 截面增量（日常）", disabled=running, use_container_width=True):
         r = start_task("截面增量", ASSET, date(2016, 1, 1), date.today(), max_days=0)
         st.toast("已启动" if r.get("ok") else f"启动失败：{r.get('error')}")
+    if st.button("🗂 重建覆盖清单", disabled=running, use_container_width=True):
+        r = start_task("重建覆盖清单", ASSET, date(2016, 1, 1), date.today(), max_days=0)
+        st.toast("已启动" if r.get("ok") else f"启动失败：{r.get('error')}")
     if running:
         if st.button("⏹ 停止", use_container_width=True):
             stop_task()
@@ -177,32 +180,32 @@ def show_progress() -> None:
         st.progress(min(float(s.get("percent", 0.0)), 1.0))
         p1, p2, p3, p4 = st.columns(4)
         p1.metric("任务", s.get("task"))
-        if s.get("mode") == "stock":
+        if s.get("mode") == "rebuild":
+            p2.metric("当前年份", s.get("current") or "-")
+            p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 年")
+            p4.metric("已生成行数", f"{s.get('filled_rows', 0):,}")
+        elif s.get("mode") == "stock":
             p2.metric("当前股票", s.get("current") or "-")
             p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 只")
+            p4.metric("已入库行数", f"{s.get('filled_rows', 0):,}")
         else:
             p2.metric("当前日期", s.get("current") or "-")
             p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 天")
-        p4.metric("已入库行数", f"{s.get('filled_rows', 0):,}")
+            p4.metric("已入库行数", f"{s.get('filled_rows', 0):,}")
         if s.get("mode") == "section":
             missing = s.get("missing_count", 0)
             filled = s.get("filled_count", 0)
-            unreturned = s.get("unreturned_count", missing - filled if missing else 0)
-            if s.get("suspended_count") is not None:
-                susp = s.get("suspended_count", 0)
-                review = s.get("anomaly_count", 0) + s.get("boundary_count", 0)
-                st.caption(
-                    f"当日：待补 {missing} 只 → 已入库 {filled} 只 · "
-                    f"停牌 {susp} 只 · 待复核 {review} 只"
-                    "（未返回≠失败：连续 3 次未返回才标记疑似停牌，30 天自动复核）"
-                )
-            else:
-                st.caption(
-                    f"当日：待补 {missing} 只 → 已入库 {filled} 只 · 未返回 {unreturned} 只"
-                    "（通常为当日停牌/无数据，已自动复核）"
-                )
-        elif s.get("failed_count"):
-            st.caption(f"本次未获取 {s.get('failed_count')} 条（通常为当日停牌/无数据，已自动复核）")
+            no_data = s.get("no_data_count", 0)
+            retry = s.get("retry_count", 0)
+            st.caption(
+                f"当日：待补 {missing} → 已入库 {filled} · 空补 {no_data} · 待复核 {retry}"
+                "（空补=确认停牌/退市日/代码变更；待复核自动重试，异常 30 天 / 其余 365 天复核）"
+            )
+        elif s.get("mode") == "stock" and s.get("failed_count"):
+            st.caption(
+                f"本股已入库 {s.get('filled_count', 0)} 行 · 空补 {s.get('no_data_count', 0)} · "
+                f"待复核 {s.get('retry_count', 0)}（自动重试，异常 30 天 / 其余 365 天复核）"
+            )
     elif s.get("result") is not None or s.get("error"):
         st.subheader("最近任务结果")
         if s.get("error"):
@@ -210,12 +213,23 @@ def show_progress() -> None:
         else:
             r = s.get("result") or {}
             note = "（已停止）" if r.get("stopped") else ""
-            failed_n = r.get("failed", 0)
-            tail = f"，未返回 {failed_n} 条（已记复核）" if failed_n else ""
-            st.success(
-                f"{s.get('message')}{note}：检查 {r.get('checked_days', 0)} 天，"
-                f"已入库 {r.get('filled_rows', 0)} 行{tail}"
-            )
+            if r.get("years") is not None:
+                empty = "（空）" if r.get("rows", 0) == 0 else ""
+                stale = len(r.get("deleted_stale_years", []))
+                st.success(
+                    f"{s.get('message')}{note}：重建覆盖清单{empty}"
+                    f"：{len(r.get('years', []))} 年 / {r.get('rows', 0):,} 行"
+                    + (f"，清理残留 {stale} 个年份" if stale else "")
+                )
+            else:
+                failed_n = r.get("failed", 0)
+                no_data_n = r.get("no_data", 0)
+                tail = f"，空补 {no_data_n} 条" if no_data_n else ""
+                tail2 = f"，待复核 {failed_n} 条" if failed_n else ""
+                st.success(
+                    f"{s.get('message')}{note}：检查 {r.get('checked_days', 0)} 天，"
+                    f"已入库 {r.get('filled_rows', 0)} 行{tail}{tail2}"
+                )
 
 
 show_progress()
