@@ -391,8 +391,7 @@ def align(
             )
         print(
             f"[align] {d} 待补 {len(missing)} → 已入库 {len(got)} · "
-            f"空补 {no_data_n}（停牌 {len(susp_syms)}/边界 {len(boundary_syms)}/"
-            f"代码变更 {len(nostatus_syms)}）· "
+            f"空补 {no_data_n}（停牌 {len(susp_syms)}/边界 {len(boundary_syms) + len(nostatus_syms)}）· "
             f"待复核 {len(unreturned) - no_data_n}",
             flush=True,
         )

@@ -4,6 +4,7 @@
 - coverage 定位为"bars 的纯投影、可全量重建"：新增 data/rebuild.py（CLI --asset/--dry-run/--compare；WebUI 新增"重建覆盖清单"按钮）；只读 bars 的 (date,symbol) 列按年重建并原子覆盖写，清理"无 bars 年份的残留 coverage"（修复删 bars 留 coverage 的误判完整）；清空前实测漂移=0（11 年 / 673.9 万行）。
 - 空补记账：新增 status/no_data.parquet 独立账本（date, symbol, reason, last_seen），coverage 保持纯投影；分类准入——确认停牌（is_suspended=1）/退市日/上市日/无状态记录（代码变更特征，批次状态接口正常时）**立即记账**，与停牌同等待遇；异常（有行情未返回）/状态接口失败走 suspect 累计，3 次后按 reason 记账；复核自愈——anomaly/unknown 30 天，suspended/boundary/code_change 365 天，到期重新验证。
 - 无状态即时记账前审计：10 个跨年份交易日（2016–2025）实测，无状态集合仅 SZSE.302132（9/10 天，2025-02 后它有行情不再出现），异常集合为空——确认"批次接口正常 + 唯独无记录"即代码变更特征，可安全即时记账；市场全量模式下单股区间状态查询为空（整段无记录）仍保守走 3 次重试。
+- 显示口径微调：代码变更计数并入"边界"（CLI/WebUI 统一显示"停牌/边界"；no_data 内部 reason 仍保留 code_change 供审计）；WebUI 进度区新增"停止任务"按钮（与侧边栏停止并存，方便运行中即时停止）。
 - 完整性口径更新：某天完整 ⟺ coverage(d) ∪ no_data(d) ⊇ 当日有效性集合；长期停牌/退市日/代码变更不再"每 30 天空拉"（旧机制=3 次+30 天复核；新机制=分类即时/3 次记账 + 30/365 天复核）。
 - 命令行动态输出统一：全量/增量 print 与任务日志改为三段式（待补 → 已入库 + 空补 + 待复核），去除"失败"字样。
 - 测试：新增 tests/test_rebuild.py（4 例）与 tests/test_ledger.py（4 例），pytest 13 项通过。

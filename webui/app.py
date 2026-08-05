@@ -199,13 +199,16 @@ def show_progress() -> None:
             retry = s.get("retry_count", 0)
             st.caption(
                 f"当日：待补 {missing} → 已入库 {filled} · 空补 {no_data} · 待复核 {retry}"
-                "（空补=确认停牌/退市日/代码变更；待复核自动重试，异常 30 天 / 其余 365 天复核）"
+                "（空补=确认停牌/边界[退市日·上市日·代码变更]；待复核自动重试，异常 30 天 / 其余 365 天复核）"
             )
         elif s.get("mode") == "stock" and s.get("failed_count"):
             st.caption(
                 f"本股已入库 {s.get('filled_count', 0)} 行 · 空补 {s.get('no_data_count', 0)} · "
                 f"待复核 {s.get('retry_count', 0)}（自动重试，异常 30 天 / 其余 365 天复核）"
             )
+        if st.button("⏹ 停止任务", use_container_width=False):
+            stop_task()
+            st.toast("已发送停止指令，任务将在当前步骤结束后停止")
     elif s.get("result") is not None or s.get("error"):
         st.subheader("最近任务结果")
         if s.get("error"):
