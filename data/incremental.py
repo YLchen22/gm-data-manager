@@ -21,6 +21,7 @@ from typing import Callable
 
 import pandas as pd
 from dotenv import load_dotenv
+from gm.api import get_history_instruments
 
 from data.asset import load_assets, valid_symbols_on
 from data.gm_source import GmDataSource
@@ -103,6 +104,46 @@ def _missing_blocks(store: Store, assets: pd.DataFrame, start: date, end: date) 
         if missing:
             blocks.append((d, missing))
     return blocks
+
+
+def _classify_unreturned(assets: pd.DataFrame, d: date, symbols: list[str]) -> tuple[int, int, int]:
+    """best-effort 展示分类：未返回符号 =（停牌, 真异常, 边界/未知）。
+
+    仅用于窗口反馈，抓取与 suspect 机制不变：所有未返回仍照旧计 failed 并走
+    "连续 3 次 → 疑似停牌 → 30 天复核"流程；本函数接口失败时整体降级为边界
+    （待复核），不影响任务正确性。
+    - 边界：退市日当天、上市日当天、无状态记录（如代码变更的新代码历史日）。
+    """
+    if not symbols:
+        return (0, 0, 0)
+    bd = assets.set_index("symbol")[["listed_date", "delisted_date"]]
+    rest: list[str] = []
+    boundary_n = 0
+    for s in symbols:
+        row = bd.loc[s]
+        if row["listed_date"] == d or row["delisted_date"] == d:
+            boundary_n += 1
+        else:
+            rest.append(s)
+    try:
+        hi = get_history_instruments(
+            symbols=",".join(rest), start_date=d.isoformat(), end_date=d.isoformat(), df=True
+        )
+    except Exception:
+        hi = None
+    if hi is None or hi.empty:
+        return (0, 0, len(symbols))
+    status_map = dict(zip(hi["symbol"], hi["is_suspended"]))
+    suspended_n = anomaly_n = 0
+    for s in rest:
+        st = status_map.get(s)
+        if st == 1:
+            suspended_n += 1
+        elif st == 0:
+            anomaly_n += 1
+        else:
+            boundary_n += 1
+    return (suspended_n, anomaly_n, boundary_n)
 
 
 def scan_missing(start: date, end: date) -> list[tuple[date, set[str]]]:
@@ -204,8 +245,10 @@ def align(
             store.write_bars("stock", df)
             store.write_coverage("stock", df)
             filled_rows += len(df)
-        for s in missing - got:
+        unreturned = sorted(missing - got)
+        for s in unreturned:
             failed.append((d, s))
+        suspended_n, anomaly_n, boundary_n = _classify_unreturned(assets, d, unreturned)
         if progress_cb is not None:
             progress_cb(
                 {
@@ -215,12 +258,20 @@ def align(
                     "total_days": total,
                     "missing_count": len(missing),
                     "filled_count": len(got),
+                    "unreturned_count": len(unreturned),
+                    "suspended_count": suspended_n,
+                    "anomaly_count": anomaly_n,
+                    "boundary_count": boundary_n,
                     "filled_rows": filled_rows,
                     "failed_count": len(failed),
                     "percent": (idx + 1) / total if total else 1.0,
                 }
             )
-        print(f"[align] {d} 缺失 {len(missing)} 只，补齐 {len(got)} 只", flush=True)
+        print(
+            f"[align] {d} 待补 {len(missing)}，已入库 {len(got)}，"
+            f"未返回 {len(unreturned)}（停牌 {suspended_n}/异常 {anomaly_n}/边界 {boundary_n}）",
+            flush=True,
+        )
 
     if failed:
         _update_suspect(failed)

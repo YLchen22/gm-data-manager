@@ -183,12 +183,26 @@ def show_progress() -> None:
         else:
             p2.metric("当前日期", s.get("current") or "-")
             p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 天")
-        p4.metric("已补行数", f"{s.get('filled_rows', 0):,}")
-        if s.get("failed_count"):
-            st.caption(
-                f"差额说明：本次未获取 {s.get('failed_count')} 条（通常为当日停牌/无数据，"
-                "gm 不返回停牌日行情；自动重试，连续 3 次后标记为疑似停牌不再计入缺失）"
-            )
+        p4.metric("已入库行数", f"{s.get('filled_rows', 0):,}")
+        if s.get("mode") == "section":
+            missing = s.get("missing_count", 0)
+            filled = s.get("filled_count", 0)
+            unreturned = s.get("unreturned_count", missing - filled if missing else 0)
+            if s.get("suspended_count") is not None:
+                susp = s.get("suspended_count", 0)
+                review = s.get("anomaly_count", 0) + s.get("boundary_count", 0)
+                st.caption(
+                    f"当日：待补 {missing} 只 → 已入库 {filled} 只 · "
+                    f"停牌 {susp} 只 · 待复核 {review} 只"
+                    "（未返回≠失败：连续 3 次未返回才标记疑似停牌，30 天自动复核）"
+                )
+            else:
+                st.caption(
+                    f"当日：待补 {missing} 只 → 已入库 {filled} 只 · 未返回 {unreturned} 只"
+                    "（通常为当日停牌/无数据，已自动复核）"
+                )
+        elif s.get("failed_count"):
+            st.caption(f"本次未获取 {s.get('failed_count')} 条（通常为当日停牌/无数据，已自动复核）")
     elif s.get("result") is not None or s.get("error"):
         st.subheader("最近任务结果")
         if s.get("error"):
@@ -196,7 +210,12 @@ def show_progress() -> None:
         else:
             r = s.get("result") or {}
             note = "（已停止）" if r.get("stopped") else ""
-            st.success(f"{s.get('message')}{note}：检查 {r.get('checked_days', 0)} 天，补齐 {r.get('filled_rows', 0)} 行")
+            failed_n = r.get("failed", 0)
+            tail = f"，未返回 {failed_n} 条（已记复核）" if failed_n else ""
+            st.success(
+                f"{s.get('message')}{note}：检查 {r.get('checked_days', 0)} 天，"
+                f"已入库 {r.get('filled_rows', 0)} 行{tail}"
+            )
 
 
 show_progress()
