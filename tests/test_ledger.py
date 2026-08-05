@@ -38,20 +38,25 @@ def test_review_no_data_expiry_by_reason(monkeypatch, tmp_path):
     _patch_paths(monkeypatch, tmp_path)
     now = pd.Timestamp.now()
     old = now - timedelta(days=40)   # anomaly 超 30 天 → 到期
-    old_long = now - timedelta(days=40)  # suspended 超 30 但 < 365 → 保留
+    old_long = now - timedelta(days=40)  # suspended/code_change 超 30 但 < 365 → 保留
     df = pd.DataFrame(
         {
-            "date": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")],
-            "symbol": ["SZSE.000001", "SHSE.600000"],
-            "reason": ["anomaly", "suspended"],
-            "last_seen": [old, old_long],
+            "date": [
+                pd.Timestamp("2020-01-02"),
+                pd.Timestamp("2020-01-03"),
+                pd.Timestamp("2020-01-04"),
+            ],
+            "symbol": ["SZSE.000001", "SHSE.600000", "SZSE.302132"],
+            "reason": ["anomaly", "suspended", "code_change"],
+            "last_seen": [old, old_long, old_long],
         }
     )
     inc._save_no_data(df)
 
     inc._review_no_data()
     nd = inc._load_no_data()
-    assert list(nd["symbol"]) == ["SHSE.600000"]  # anomaly 被清，suspended 保留
+    # anomaly 被清；suspended/code_change 保留（长复核）
+    assert list(nd["symbol"]) == ["SHSE.600000", "SZSE.302132"]
 
 
 def test_no_data_blocked_set(monkeypatch, tmp_path):

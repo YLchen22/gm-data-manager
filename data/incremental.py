@@ -11,7 +11,7 @@
 - no_data 独立账本登记"确认无行情"的 (date, symbol, reason)：
     suspended   确认停牌（get_history_instruments is_suspended=1）
     boundary    退市日/上市日当天
-    code_change 连续 3 次无状态记录（代码变更特征，如 302132 中航成飞）
+    code_change 批次状态接口正常但该符号无记录（代码变更特征，如 302132 中航成飞）→ 即时记账
     anomaly     连续 3 次"有行情却未返回"（数据缺口/瞬时故障）
     unknown     状态接口失败时降级，走重试
 - 某天完整 ⟺ coverage(d) ∪ no_data(d) ⊇ 当日有效性集合；
@@ -188,7 +188,8 @@ def _classify_unreturned(
     - 边界：退市日/上市日当天 → 直接 no_data(boundary)；
     - 停牌：is_suspended=1 → 直接 no_data(suspended)；
     - 异常：is_suspended=0 却无行情 → suspect 重试（数据缺口/瞬时）；
-    - 无状态：同批其他符号有记录、唯独它没有 → suspect 重试（代码变更特征）；
+    - 无状态：同批其他符号有记录、唯独它没有 → 直接 no_data(code_change)（代码变更特征，
+      抽样 10 个跨年份交易日验证集合仅 302132，异常集合为空）；
     状态接口失败 → 全部按 unknown 走 suspect 重试。
     """
     if not symbols:
@@ -366,11 +367,11 @@ def align(
         if api_ok:
             _mark_no_data([(d, s) for s in susp_syms], "suspended")
             _mark_no_data([(d, s) for s in boundary_syms], "boundary")
+            _mark_no_data([(d, s) for s in nostatus_syms], "code_change")
             failed.extend((d, s, "anomaly") for s in anomaly_syms)
-            failed.extend((d, s, "code_change") for s in nostatus_syms)
         else:
             failed.extend((d, s, "unknown") for s in unreturned)
-        no_data_n = len(susp_syms) + len(boundary_syms)
+        no_data_n = len(susp_syms) + len(boundary_syms) + len(nostatus_syms)
         no_data_rows += no_data_n
         if progress_cb is not None:
             progress_cb(
@@ -390,7 +391,8 @@ def align(
             )
         print(
             f"[align] {d} 待补 {len(missing)} → 已入库 {len(got)} · "
-            f"空补 {no_data_n}（停牌 {len(susp_syms)}/边界 {len(boundary_syms)}）· "
+            f"空补 {no_data_n}（停牌 {len(susp_syms)}/边界 {len(boundary_syms)}/"
+            f"代码变更 {len(nostatus_syms)}）· "
             f"待复核 {len(unreturned) - no_data_n}",
             flush=True,
         )
@@ -450,12 +452,12 @@ def align_by_stock(
             if api_ok:
                 _mark_no_data([(d, sym) for d in susp_days], "suspended")
                 _mark_no_data([(d, sym) for d in boundary_days], "boundary")
+                _mark_no_data([(d, sym) for d in nostatus_days], "code_change")
                 failed.extend((d, sym, "anomaly") for d in anomaly_days)
-                failed.extend((d, sym, "code_change") for d in nostatus_days)
             else:
                 failed.extend((d, sym, "unknown") for d in unfilled)
-            sym_no_data += len(susp_days) + len(boundary_days)
-            sym_retry += len(anomaly_days) + len(nostatus_days) if api_ok else len(unfilled)
+            sym_no_data += len(susp_days) + len(boundary_days) + len(nostatus_days)
+            sym_retry += len(anomaly_days) if api_ok else len(unfilled)
         filled_rows += sym_filled
         no_data_rows += sym_no_data
         if progress_cb is not None:
