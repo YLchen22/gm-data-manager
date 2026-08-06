@@ -14,10 +14,10 @@ def _patch_paths(monkeypatch, tmp_path):
 
 def test_completed_days_excludes_today_before_cutoff():
     days = [date(2026, 8, 5), date(2026, 8, 6)]
-    # 结算时点前：今天剔除
+    # 收盘结算时点(18:00)前：今天剔除
     assert inc._completed_days(days, today=date(2026, 8, 6), now=time(10, 0)) == [date(2026, 8, 5)]
-    # 结算时点后：今天保留
-    assert inc._completed_days(days, today=date(2026, 8, 6), now=time(16, 0)) == days
+    # 收盘结算时点(18:00)后：今天保留
+    assert inc._completed_days(days, today=date(2026, 8, 6), now=time(19, 0)) == days
     # 最后一天不是今天：不受影响
     assert inc._completed_days([date(2026, 8, 5)], today=date(2026, 8, 6), now=time(10, 0)) == [
         date(2026, 8, 5)
@@ -76,3 +76,56 @@ def test_no_data_blocked_set(monkeypatch, tmp_path):
     inc._mark_no_data([(date(2020, 1, 2), "SZSE.000001")], "suspended")
     blocked = inc._no_data_blocked()
     assert (date(2020, 1, 2), "SZSE.000001") in blocked
+
+
+def _fake_assets(n=100):
+    return pd.DataFrame(
+        {
+            "symbol": [f"SZSE.000{i:03d}" for i in range(n)],
+            "listed_date": [date(2010, 1, 1)] * n,
+            "delisted_date": [date(2038, 1, 1)] * n,
+        }
+    )
+
+
+def test_audit_flags_and_cleans_anomaly_days(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path)
+    days = [date(2026, 8, 5), date(2026, 8, 6)]
+    rows = []
+    for i in range(60):  # 8-05: 60 条 anomaly > 阈值 50 → 标记并清除
+        rows.append((pd.Timestamp("2026-08-05"), f"SZSE.000{i:03d}", "anomaly"))
+    for i in range(10):  # 8-06: 10 条 ≤ 阈值 → 保留
+        rows.append((pd.Timestamp("2026-08-06"), f"SZSE.000{i:03d}", "anomaly"))
+    nd = pd.DataFrame(rows, columns=["date", "symbol", "reason"])
+    nd["last_seen"] = pd.Timestamp.now()
+    inc._save_no_data(nd)
+
+    res = inc.audit_no_data(
+        date(2016, 1, 1), date(2026, 8, 6), dry_run=False,
+        assets=_fake_assets(), trading_days=days,
+    )
+    assert res["flagged_days"] == ["2026-08-05"]
+    assert res["removed_rows"] == 60
+    assert len(inc._load_no_data()) == 10
+
+
+def test_audit_dry_run_keeps_entries(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path)
+    days = [date(2026, 8, 5)]
+    nd = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2026-08-05")] * 60,
+            "symbol": [f"SZSE.000{i:03d}" for i in range(60)],
+            "reason": ["anomaly"] * 60,
+            "last_seen": [pd.Timestamp.now()] * 60,
+        }
+    )
+    inc._save_no_data(nd)
+
+    res = inc.audit_no_data(
+        date(2016, 1, 1), date(2026, 8, 6), dry_run=True,
+        assets=_fake_assets(), trading_days=days,
+    )
+    assert res["flagged_days"] == ["2026-08-05"]
+    assert res["removed_rows"] == 0
+    assert len(inc._load_no_data()) == 60

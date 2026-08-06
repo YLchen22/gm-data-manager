@@ -218,10 +218,19 @@ def show_progress() -> None:
             if r.get("years") is not None:
                 empty = "（空）" if r.get("rows", 0) == 0 else ""
                 stale = len(r.get("deleted_stale_years", []))
+                aud = r.get("audit") or {}
+                if aud.get("flagged_days"):
+                    audit_txt = (
+                        f"，异常审计标记 {len(aud['flagged_days'])} 天需重抓 / "
+                        f"清除 {aud.get('removed_rows', 0)} 条"
+                    )
+                else:
+                    audit_txt = "，异常审计无存疑"
                 st.success(
                     f"{s.get('message')}{note}：重建覆盖清单{empty}"
                     f"：{len(r.get('years', []))} 年 / {r.get('rows', 0):,} 行"
                     + (f"，清理残留 {stale} 个年份" if stale else "")
+                    + audit_txt
                 )
             else:
                 failed_n = r.get("failed", 0)

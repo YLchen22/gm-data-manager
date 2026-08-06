@@ -44,7 +44,9 @@ NO_DATA_PATH = Path(__file__).resolve().parent / "cache" / "status" / "no_data.p
 MAX_ATTEMPTS = 3
 REVIEW_DAYS = 30        # anomaly/unknown：可能恢复 → 短复核
 REVIEW_DAYS_LONG = 365  # suspended/boundary/code_change：确定性无数据 → 长复核
-TODAY_CUTOFF = time(15, 30)  # 当日行情可抓取的时点（收盘后留结算缓冲）
+TODAY_CUTOFF = time(18, 0)  # 当日行情可抓取的时点（收盘后留结算缓冲）
+ANOMALY_ABS_MIN = 50     # 单日异常记账绝对阈值：超过即判定该天清单存疑
+ANOMALY_RATIO = 0.01     # 单日异常记账占有效股票比例阈值（取两者较大者）
 
 ProgressCB = Callable[[dict], None]
 StopCheck = Callable[[], bool]
@@ -171,6 +173,56 @@ def _review_no_data() -> None:
     expire = ((df["reason"].isin(["anomaly", "unknown"])) & (last < short_cut)) | (last < long_cut)
     if expire.any():
         _save_no_data(df[~expire])
+
+
+def audit_no_data(
+    start: date,
+    end: date,
+    dry_run: bool = False,
+    assets: pd.DataFrame | None = None,
+    trading_days: list[date] | None = None,
+) -> dict:
+    """保险检查：按日审计 no_data 中 anomaly/unknown 记账是否异常偏多。
+
+    正常行情日的 anomaly 记账应为 0（跨年份抽样验证）；当某天异常条数
+    > max(ANOMALY_ABS_MIN, valid × ANOMALY_RATIO) 时，说明该天清单可能被
+    "误记无数据"污染（如早盘把未结算的当天记成异常），判定为存疑：
+    - dry_run=False：移除该天 anomaly/unknown 记账，使其重新进入缺失，
+      由下次抓取重抓——真实数据能拿到则补上，拿不到则进入"审计-重抓"循环，
+      绝不静默漏抓；
+    - dry_run=True：只报告，不修改。
+    """
+    if assets is None or trading_days is None:
+        assets, trading_days, _, _, _ = _plan(start, end)
+    nd = _load_no_data()
+    if nd.empty:
+        return {"flagged_days": [], "removed_rows": 0, "details": []}
+    nd = nd.copy()
+    nd["d"] = pd.to_datetime(nd["date"]).dt.date
+    anomaly = nd[nd["reason"].isin(["anomaly", "unknown"])]
+    flagged: list[date] = []
+    details: list[dict] = []
+    for d in trading_days:
+        cnt = int((anomaly["d"] == d).sum())
+        if cnt == 0:
+            continue
+        valid_n = len(valid_symbols_on(assets, d))
+        threshold = max(ANOMALY_ABS_MIN, int(valid_n * ANOMALY_RATIO))
+        if cnt > threshold:
+            flagged.append(d)
+            details.append(
+                {"day": d.isoformat(), "valid": valid_n, "anomaly": cnt, "threshold": threshold}
+            )
+    removed = 0
+    if flagged and not dry_run:
+        drop = nd["reason"].isin(["anomaly", "unknown"]) & nd["d"].isin(flagged)
+        removed = int(drop.sum())
+        _save_no_data(nd[~drop])
+    return {
+        "flagged_days": [d.isoformat() for d in flagged],
+        "removed_rows": removed,
+        "details": details,
+    }
 
 
 # ---------- 缺失计算 ----------

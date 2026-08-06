@@ -33,7 +33,7 @@ def test_rebuild_generates_coverage(tmp_path):
     df = _bars_df([date(2020, 1, 2), date(2020, 1, 3)], ["SZSE.000001", "SHSE.600000"])
     store.write_bars("stock", df)
 
-    res = rebuild_coverage("stock", store=store)
+    res = rebuild_coverage("stock", store=store, audit=False)
     cov = store.coverage("stock")
 
     assert res["rows"] == 4 and res["empty"] is False
@@ -51,12 +51,12 @@ def test_rebuild_removes_stale_coverage(tmp_path):
     store = Store(root=tmp_path)
     df = _bars_df([date(2020, 1, 2)], ["SZSE.000001"])
     store.write_bars("stock", df)
-    rebuild_coverage("stock", store=store)
+    rebuild_coverage("stock", store=store, audit=False)
     assert store.coverage_path("stock", 2020).exists()
 
     # 删除 bars 后重建 → coverage 残留应被清理，报告为空
     store.bars_path("stock", 2020).unlink()
-    res = rebuild_coverage("stock", store=store)
+    res = rebuild_coverage("stock", store=store, audit=False)
 
     assert res["rows"] == 0 and res["empty"] is True
     assert res["deleted_stale_years"] == [2020]
@@ -65,7 +65,7 @@ def test_rebuild_removes_stale_coverage(tmp_path):
 
 def test_rebuild_empty_no_files(tmp_path):
     store = Store(root=tmp_path)
-    res = rebuild_coverage("stock", store=store)
+    res = rebuild_coverage("stock", store=store, audit=False)
 
     assert res["rows"] == 0 and res["empty"] is True
     assert res["deleted_stale_years"] == []
@@ -77,7 +77,7 @@ def test_rebuild_compare_detects_drift(tmp_path):
     store = Store(root=tmp_path)
     df = _bars_df([date(2020, 1, 2)], ["SZSE.000001", "SHSE.600000"])
     store.write_bars("stock", df)
-    rebuild_coverage("stock", store=store)
+    rebuild_coverage("stock", store=store, audit=False)
 
     # 现有 coverage 人为多一条（模拟"删 bars 留 coverage"漂移）
     cov = store.coverage("stock")
@@ -87,6 +87,6 @@ def test_rebuild_compare_detects_drift(tmp_path):
     merged = pd.concat([cov, extra]).drop_duplicates(subset=["date", "symbol"], keep="last")
     merged.to_parquet(store.coverage_path("stock", 2020), index=False)
 
-    res = rebuild_coverage("stock", dry_run=True, compare=True, store=store)
+    res = rebuild_coverage("stock", dry_run=True, compare=True, store=store, audit=False)
     assert res["drift_added"] == 0
     assert res["drift_removed"] == 1  # 冗余 1 行

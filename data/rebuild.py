@@ -18,10 +18,14 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import date
 from typing import Callable
 
 import pandas as pd
 
+from dotenv import load_dotenv
+
+from data.incremental import audit_no_data
 from data.store import Store
 
 
@@ -36,9 +40,12 @@ def rebuild_coverage(
     asset: str = "stock",
     dry_run: bool = False,
     compare: bool = False,
+    audit: bool = True,
     progress_cb: Callable[[dict], None] | None = None,
     stop_event: Callable[[], bool] | None = None,
     store: Store | None = None,
+    start: date | None = None,
+    end: date | None = None,
 ) -> dict:
     """从 bars 全量重建 coverage（date, symbol 投影）。
 
@@ -46,8 +53,12 @@ def rebuild_coverage(
     - 无 bars 年份的残留 coverage 文件删除（修复"删 bars 留 coverage"漂移）；
     - compare：与现有 coverage 对比输出漂移行数（只报告，不参与写入判定）；
     - dry_run：不写入不删除，仅预览。
+    重建后执行"异常记账阈值"保险检查（audit_no_data）：某天 anomaly/unknown
+    记账超过阈值判定该天清单存疑，dry_run 只报告，否则移除异常记账使其重抓。
     """
     store = store or Store()
+    start = start or date(2016, 1, 1)
+    end = end or date.today()
     bars_dir = store.bars_root / asset
     cov_dir = store.coverage_root / asset
     years = sorted(int(p.stem) for p in bars_dir.glob("*.parquet")) if bars_dir.exists() else []
@@ -99,6 +110,9 @@ def rebuild_coverage(
             p = store.coverage_path(asset, y)
             if p.exists():
                 p.unlink()
+    aud = audit_no_data(start, end, dry_run=dry_run) if audit else {
+        "flagged_days": [], "removed_rows": 0, "details": []
+    }
     return {
         "asset": asset,
         "years": years,
@@ -107,6 +121,7 @@ def rebuild_coverage(
         "drift_added": drift_added,
         "drift_removed": drift_removed,
         "deleted_stale_years": stale,
+        "audit": aud,
         "checked_days": len(years),
         "stopped": stopped,
         "mode": "rebuild",
@@ -123,8 +138,12 @@ def main() -> None:
     ap.add_argument("--asset", default="stock")
     ap.add_argument("--dry-run", action="store_true", help="只审计不写入")
     ap.add_argument("--compare", action="store_true", help="同时对比现有 coverage 报告漂移")
+    ap.add_argument("--no-audit", action="store_true", help="跳过异常记账阈值保险检查")
     args = ap.parse_args()
-    res = rebuild_coverage(asset=args.asset, dry_run=args.dry_run, compare=args.compare)
+    load_dotenv()
+    res = rebuild_coverage(
+        asset=args.asset, dry_run=args.dry_run, compare=args.compare, audit=not args.no_audit
+    )
     print(
         f"[rebuild] {'预览' if args.dry_run else '完成'}: {res['asset']} "
         f"{len(res['years'])} 年 / {res['rows']} 行" + ("（空）" if res["empty"] else "")
@@ -136,6 +155,16 @@ def main() -> None:
             f"[rebuild] 漂移对比: coverage 缺 {res['drift_added']} 行 / "
             f"coverage 冗余 {res['drift_removed']} 行"
         )
+    aud = res.get("audit") or {}
+    if aud.get("flagged_days"):
+        print(
+            f"[rebuild] 异常审计: 标记 {len(aud['flagged_days'])} 天清单存疑（需重抓）: "
+            f"{aud['flagged_days'][:10]}{'...' if len(aud['flagged_days']) > 10 else ''}"
+        )
+        if not args.dry_run:
+            print(f"[rebuild] 已移除 {aud.get('removed_rows', 0)} 条异常记账，下次抓取将重抓这些天")
+    else:
+        print("[rebuild] 异常审计: 无存疑天数")
 
 
 if __name__ == "__main__":
