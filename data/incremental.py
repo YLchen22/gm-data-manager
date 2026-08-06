@@ -159,22 +159,86 @@ def _review_no_data() -> None:
 # ---------- 缺失计算 ----------
 
 
-def _missing_blocks(store: Store, assets: pd.DataFrame, start: date, end: date) -> list[tuple[date, set[str]]]:
-    """计算每个交易日的缺失 symbol 集合（coverage ∪ no_data 之外）。"""
+def _plan(
+    start: date, end: date
+) -> tuple[pd.DataFrame, list[date], dict[date, set[str]], dict[date, set[str]], pd.DataFrame]:
+    """一次性构建规划所需数据：静态表 / 交易日 / 按日覆盖索引 / 按日 no_data 索引 / 覆盖全量。
+
+    供扫描、任务规划与 WebUI 统计复用，避免重复 gm 调用与覆盖清单多次读取/分组。
+    """
     _review_no_data()
     source = GmDataSource()
+    assets = load_assets(source)
     trading_days = source.trading_dates(start, end)
     trading_days = [date.fromisoformat(d) for d in trading_days]
-    covered = store.coverage_by_date("stock")
-    blocked = _no_data_blocked()
-    blocks = []
-    for d in trading_days:
+    cov = Store().coverage("stock")
+    covered_by_date: dict[date, set[str]] = {}
+    if not cov.empty:
+        for d, g in cov.groupby(cov["date"].dt.date):
+            covered_by_date[d] = set(g["symbol"])
+    blocked_by_date: dict[date, set[str]] = {}
+    for dd, s in _no_data_blocked():
+        blocked_by_date.setdefault(dd, set()).add(s)
+    return assets, trading_days, covered_by_date, blocked_by_date, cov
+
+
+def _missing_blocks(
+    assets: pd.DataFrame,
+    trading_days: list[date],
+    covered_by_date: dict[date, set[str]],
+    blocked_by_date: dict[date, set[str]],
+    progress_cb: ProgressCB | None = None,
+) -> list[tuple[date, set[str]]]:
+    """计算每个交易日的缺失 symbol 集合（coverage ∪ no_data 之外）。"""
+    blocks: list[tuple[date, set[str]]] = []
+    total = len(trading_days)
+    for i, d in enumerate(trading_days):
         valid = valid_symbols_on(assets, d)
-        have = covered.get(d, set())
-        missing = valid - have - {s for (dd, s) in blocked if dd == d}
+        have = covered_by_date.get(d, set())
+        missing = valid - have - blocked_by_date.get(d, set())
         if missing:
             blocks.append((d, missing))
+        if progress_cb is not None and (i % 200 == 0 or i == total - 1):
+            progress_cb(
+                {
+                    "mode": "section",
+                    "phase": "scan",
+                    "current": d.isoformat(),
+                    "done_days": i + 1,
+                    "total_days": total,
+                    "percent": (i + 1) / total if total else 1.0,
+                }
+            )
     return blocks
+
+
+def scan_missing_summary(start: date, end: date) -> dict:
+    """一次性本地覆盖统计（WebUI 数据详情用）。
+
+    返回：covered_days/first_covered_day/last_covered_day/covered_cells（覆盖口径）；
+    days/rows/stocks/first_missing_day（尚未对齐口径，与任务扫描同一套逻辑）。
+    """
+    assets, trading_days, covered_by_date, blocked_by_date, cov = _plan(start, end)
+    blocks = _missing_blocks(assets, trading_days, covered_by_date, blocked_by_date)
+    covered_dates = sorted(pd.to_datetime(cov["date"]).dt.date.unique()) if not cov.empty else []
+    missing_symbols: set[str] = set()
+    missing_rows = 0
+    first_missing_day: date | None = None
+    for d, missing in blocks:
+        missing_rows += len(missing)
+        missing_symbols |= missing
+        if first_missing_day is None:
+            first_missing_day = d
+    return {
+        "covered_days": len(covered_dates),
+        "first_covered_day": covered_dates[0].isoformat() if covered_dates else None,
+        "last_covered_day": covered_dates[-1].isoformat() if covered_dates else None,
+        "covered_cells": len(cov),
+        "days": len(blocks),
+        "rows": missing_rows,
+        "stocks": len(missing_symbols),
+        "first_missing_day": first_missing_day.isoformat() if first_missing_day else None,
+    }
 
 
 # ---------- 分类（供"确认无数据"记账 + 展示） ----------
@@ -272,10 +336,8 @@ def scan_missing(start: date, end: date) -> list[tuple[date, set[str]]]:
 
     用于 WebUI 在启动任务前展示"尚未对齐"统计。
     """
-    store = Store()
-    source = GmDataSource()
-    assets = load_assets(source)
-    return _missing_blocks(store, assets, start, end)
+    assets, trading_days, covered_by_date, blocked_by_date, _ = _plan(start, end)
+    return _missing_blocks(assets, trading_days, covered_by_date, blocked_by_date)
 
 
 def _merge_trading_ranges(missing: list[date], trading_days: list[date]) -> list[tuple[date, date]]:
@@ -340,8 +402,21 @@ def align(
     """截面增量（按天）：补齐缺失截面；确认无数据记入 no_data 账本。"""
     store = Store()
     source = GmDataSource()
-    assets = load_assets(source)
-    blocks = _missing_blocks(store, assets, start, end)
+    assets, trading_days, covered_by_date, blocked_by_date, _ = _plan(start, end)
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "mode": "section",
+                "phase": "scan",
+                "current": "",
+                "done_days": 0,
+                "total_days": len(trading_days),
+                "percent": 0.0,
+            }
+        )
+    blocks = _missing_blocks(
+        assets, trading_days, covered_by_date, blocked_by_date, progress_cb=progress_cb
+    )
     if max_days > 0:
         blocks = blocks[:max_days]
 
@@ -377,6 +452,7 @@ def align(
             progress_cb(
                 {
                     "mode": "section",
+                    "phase": "fetch",
                     "current": d.isoformat(),
                     "done_days": idx + 1,
                     "total_days": total,
@@ -463,6 +539,7 @@ def align_by_stock(
             progress_cb(
                 {
                     "mode": "stock",
+                    "phase": "fetch",
                     "current": sym,
                     "done_days": idx + 1,
                     "total_days": total,
