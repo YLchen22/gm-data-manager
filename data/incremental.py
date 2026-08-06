@@ -184,7 +184,10 @@ def audit_no_data(
 ) -> dict:
     """保险检查：按日审计 no_data 中 anomaly/unknown 记账是否异常偏多。
 
-    正常行情日的 anomaly 记账应为 0（跨年份抽样验证）；当某天异常条数
+    只统计 anomaly/unknown（"可能有行情却没拿到"），不统计 suspended/boundary/
+    code_change——后三类由状态接口确认过（is_suspended=1 / 退市日 / 代码变更），
+    属合理无行情，2016 等停牌高发期一天几百条停牌也不应触发。
+    正常行情日的 anomaly 记账应为 0（跨年份抽样验证，10 年每天最多 1 条）；当某天异常条数
     > max(ANOMALY_ABS_MIN, valid × ANOMALY_RATIO) 时，说明该天清单可能被
     "误记无数据"污染（如早盘把未结算的当天记成异常），判定为存疑：
     - dry_run=False：移除该天 anomaly/unknown 记账，使其重新进入缺失，
@@ -200,10 +203,11 @@ def audit_no_data(
     nd = nd.copy()
     nd["d"] = pd.to_datetime(nd["date"]).dt.date
     anomaly = nd[nd["reason"].isin(["anomaly", "unknown"])]
+    counts = anomaly.groupby("d").size()
     flagged: list[date] = []
     details: list[dict] = []
     for d in trading_days:
-        cnt = int((anomaly["d"] == d).sum())
+        cnt = int(counts.get(d, 0))
         if cnt == 0:
             continue
         valid_n = len(valid_symbols_on(assets, d))
