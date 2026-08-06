@@ -27,7 +27,7 @@ import argparse
 import os
 import sys
 from bisect import bisect_left, bisect_right
-from datetime import date
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Callable
 
@@ -44,9 +44,26 @@ NO_DATA_PATH = Path(__file__).resolve().parent / "cache" / "status" / "no_data.p
 MAX_ATTEMPTS = 3
 REVIEW_DAYS = 30        # anomaly/unknown：可能恢复 → 短复核
 REVIEW_DAYS_LONG = 365  # suspended/boundary/code_change：确定性无数据 → 长复核
+TODAY_CUTOFF = time(15, 30)  # 当日行情可抓取的时点（收盘后留结算缓冲）
 
 ProgressCB = Callable[[dict], None]
 StopCheck = Callable[[], bool]
+
+
+# ---------- 当日未完成保护 ----------
+
+
+def _completed_days(days: list[date], today: date | None = None, now: time | None = None) -> list[date]:
+    """剔除尚未完成的交易日：今天未到收盘结算时点前不纳入目标范围。
+
+    避免把"当日未开盘/未结算"误当成无数据而记入 no_data（导致当日真实行情漏抓）。
+    抓取层另有兜底：结算后仍拉不到的"今天"也不记账，留待次日以历史日身份重试。
+    """
+    today = today or date.today()
+    now = now or datetime.now().time()
+    if days and days[-1] == today and now < TODAY_CUTOFF:
+        return days[:-1]
+    return days
 
 
 # ---------- suspect（待复核计数，只存"未确认"） ----------
@@ -170,7 +187,7 @@ def _plan(
     source = GmDataSource()
     assets = load_assets(source)
     trading_days = source.trading_dates(start, end)
-    trading_days = [date.fromisoformat(d) for d in trading_days]
+    trading_days = _completed_days([date.fromisoformat(d) for d in trading_days])
     cov = Store().coverage("stock")
     covered_by_date: dict[date, set[str]] = {}
     if not cov.empty:
@@ -388,7 +405,7 @@ def scan_missing_stocks(start: date, end: date) -> list[tuple[str, list[tuple[da
     store = Store()
     source = GmDataSource()
     assets = load_assets(source)
-    trading_days = [date.fromisoformat(d) for d in source.trading_dates(start, end)]
+    trading_days = _completed_days([date.fromisoformat(d) for d in source.trading_dates(start, end)])
     return _missing_ranges_by_stock(store, assets, trading_days, start, end)
 
 
@@ -436,17 +453,33 @@ def align(
             store.write_coverage("stock", df)
             filled_rows += len(df)
         unreturned = sorted(missing - got)
-        susp_syms, boundary_syms, anomaly_syms, nostatus_syms, api_ok = _classify_unreturned(
-            assets, d, unreturned
-        )
-        if api_ok:
-            _mark_no_data([(d, s) for s in susp_syms], "suspended")
-            _mark_no_data([(d, s) for s in boundary_syms], "boundary")
-            _mark_no_data([(d, s) for s in nostatus_syms], "code_change")
-            failed.extend((d, s, "anomaly") for s in anomaly_syms)
+        today = date.today()
+        if d < today:
+            susp_syms, boundary_syms, anomaly_syms, nostatus_syms, api_ok = _classify_unreturned(
+                assets, d, unreturned
+            )
+            if api_ok:
+                _mark_no_data([(d, s) for s in susp_syms], "suspended")
+                _mark_no_data([(d, s) for s in boundary_syms], "boundary")
+                _mark_no_data([(d, s) for s in nostatus_syms], "code_change")
+                failed.extend((d, s, "anomaly") for s in anomaly_syms)
+            else:
+                failed.extend((d, s, "unknown") for s in unreturned)
+            no_data_n = len(susp_syms) + len(boundary_syms) + len(nostatus_syms)
+            print(
+                f"[align] {d} 待补 {len(missing)} → 已入库 {len(got)} · "
+                f"空补 {no_data_n}（停牌 {len(susp_syms)}/边界 {len(boundary_syms) + len(nostatus_syms)}）· "
+                f"待复核 {len(unreturned) - no_data_n}",
+                flush=True,
+            )
         else:
-            failed.extend((d, s, "unknown") for s in unreturned)
-        no_data_n = len(susp_syms) + len(boundary_syms) + len(nostatus_syms)
+            # 当日（未结算/数据未到位）：不记账、不进 suspect，留待次日以历史日身份重试
+            no_data_n = 0
+            print(
+                f"[align] {d} 待补 {len(missing)} → 已入库 {len(got)} · "
+                f"未返回 {len(unreturned)}（当日未结算，留待下次）",
+                flush=True,
+            )
         no_data_rows += no_data_n
         if progress_cb is not None:
             progress_cb(
@@ -459,18 +492,12 @@ def align(
                     "missing_count": len(missing),
                     "filled_count": len(got),
                     "no_data_count": no_data_n,
-                    "retry_count": len(unreturned) - no_data_n,
+                    "retry_count": len(unreturned) - no_data_n if d < today else 0,
                     "filled_rows": filled_rows,
                     "failed_count": len(failed),
                     "percent": (idx + 1) / total if total else 1.0,
                 }
             )
-        print(
-            f"[align] {d} 待补 {len(missing)} → 已入库 {len(got)} · "
-            f"空补 {no_data_n}（停牌 {len(susp_syms)}/边界 {len(boundary_syms) + len(nostatus_syms)}）· "
-            f"待复核 {len(unreturned) - no_data_n}",
-            flush=True,
-        )
 
     if failed:
         _update_suspect(failed)
@@ -499,7 +526,7 @@ def align_by_stock(
     store = Store()
     source = GmDataSource()
     assets = load_assets(source)
-    trading_days = [date.fromisoformat(d) for d in source.trading_dates(start, end)]
+    trading_days = _completed_days([date.fromisoformat(d) for d in source.trading_dates(start, end)])
     jobs = _missing_ranges_by_stock(store, assets, trading_days, start, end)
     total = len(jobs)
     filled_rows = 0
@@ -521,18 +548,22 @@ def align_by_stock(
                 store.write_coverage("stock", df)
                 sym_filled += len(df)
             unfilled = [d for d in trading_days if rs <= d <= re_ and d not in got_days]
-            susp_days, boundary_days, anomaly_days, nostatus_days, api_ok = _classify_unreturned_days(
-                assets, sym, unfilled
-            )
-            if api_ok:
-                _mark_no_data([(d, sym) for d in susp_days], "suspended")
-                _mark_no_data([(d, sym) for d in boundary_days], "boundary")
-                _mark_no_data([(d, sym) for d in nostatus_days], "code_change")
-                failed.extend((d, sym, "anomaly") for d in anomaly_days)
-            else:
-                failed.extend((d, sym, "unknown") for d in unfilled)
-            sym_no_data += len(susp_days) + len(boundary_days) + len(nostatus_days)
-            sym_retry += len(anomaly_days) if api_ok else len(unfilled)
+            today = date.today()
+            pending = [d for d in unfilled if d >= today]  # 当日未结算：不记账，留待下次
+            unfilled = [d for d in unfilled if d < today]
+            if unfilled:
+                susp_days, boundary_days, anomaly_days, nostatus_days, api_ok = _classify_unreturned_days(
+                    assets, sym, unfilled
+                )
+                if api_ok:
+                    _mark_no_data([(d, sym) for d in susp_days], "suspended")
+                    _mark_no_data([(d, sym) for d in boundary_days], "boundary")
+                    _mark_no_data([(d, sym) for d in nostatus_days], "code_change")
+                    failed.extend((d, sym, "anomaly") for d in anomaly_days)
+                else:
+                    failed.extend((d, sym, "unknown") for d in unfilled)
+                sym_no_data += len(susp_days) + len(boundary_days) + len(nostatus_days)
+                sym_retry += len(anomaly_days) if api_ok else len(unfilled)
         filled_rows += sym_filled
         no_data_rows += sym_no_data
         if progress_cb is not None:

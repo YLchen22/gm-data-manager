@@ -1,5 +1,11 @@
 # 开发日志
 
+## 数据服务 v0.9.1：当日未完成交易日保护（2026-08-06）
+- 用户发现漏洞：早盘跑增量时当天行情返回为空，被分类为"异常/停牌"记入 no_data（实测 08-06 已误记 5205 条），之后 30 天不会再抓 → 当天真实行情漏抓。
+- 修复：①新增 `_completed_days`：收盘结算时点（15:30）前把"今天"从目标交易日剔除（统计与抓取都不纳入）；②结算后即使今天仍拉不到也不记账、不进 suspect，留待次日以历史日身份重试（防 gm 数据滞后造成污染）。
+- 清理：删除 no_data 中 2026-08-06 的 5205 条误记；复查过去日期 anomaly 无覆盖仅 5 条（302132 代码变更过渡日 4 条 + 300214 06-29 1 条，均非确认漏抓，30 天复核会再验证）。
+- 测试：新增 _completed_days 用例，pytest 14 项通过。
+
 ## 数据服务 v0.9：coverage 重建 + no_data 空补账本 + 分类准入（2026-08-05）
 - coverage 定位为"bars 的纯投影、可全量重建"：新增 data/rebuild.py（CLI --asset/--dry-run/--compare；WebUI 新增"重建覆盖清单"按钮）；只读 bars 的 (date,symbol) 列按年重建并原子覆盖写，清理"无 bars 年份的残留 coverage"（修复删 bars 留 coverage 的误判完整）；清空前实测漂移=0（11 年 / 673.9 万行）。
 - 空补记账：新增 status/no_data.parquet 独立账本（date, symbol, reason, last_seen），coverage 保持纯投影；分类准入——确认停牌（is_suspended=1）/退市日/上市日/无状态记录（代码变更特征，批次状态接口正常时）**立即记账**，与停牌同等待遇；异常（有行情未返回）/状态接口失败走 suspect 累计，3 次后按 reason 记账；复核自愈——anomaly/unknown 30 天，suspended/boundary/code_change 365 天，到期重新验证。

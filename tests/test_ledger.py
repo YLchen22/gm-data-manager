@@ -1,6 +1,6 @@
 """no_data 账本 / suspect 复核测试（纯本地，无网络）。"""
 
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 import pandas as pd
 
@@ -10,6 +10,18 @@ import data.incremental as inc
 def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(inc, "NO_DATA_PATH", tmp_path / "no_data.parquet")
     monkeypatch.setattr(inc, "SUSPECT_PATH", tmp_path / "suspect.parquet")
+
+
+def test_completed_days_excludes_today_before_cutoff():
+    days = [date(2026, 8, 5), date(2026, 8, 6)]
+    # 结算时点前：今天剔除
+    assert inc._completed_days(days, today=date(2026, 8, 6), now=time(10, 0)) == [date(2026, 8, 5)]
+    # 结算时点后：今天保留
+    assert inc._completed_days(days, today=date(2026, 8, 6), now=time(16, 0)) == days
+    # 最后一天不是今天：不受影响
+    assert inc._completed_days([date(2026, 8, 5)], today=date(2026, 8, 6), now=time(10, 0)) == [
+        date(2026, 8, 5)
+    ]
 
 
 def test_suspect_moves_to_no_data_after_3(monkeypatch, tmp_path):
