@@ -24,6 +24,9 @@ data/raw/
 *.parquet
 *.feather
 
+# 本地开发文档（不提交 GitHub）
+开发文档/
+
 # 密钥（token 绝不提交）
 .env
 *.token

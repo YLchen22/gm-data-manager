@@ -1,4 +1,4 @@
-"""掘金数据源：实现 DataSource 协议（ENGINE_DESIGN.md 第 4 节）。
+"""掘金数据源：实现 DataSource 协议（开发文档/ENGINE_DESIGN.md 第 6 节）。
 
 只负责请求 gm API 并规范化为统一字段；缓存与增量由 DataHub 负责。
 """
