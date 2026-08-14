@@ -101,7 +101,135 @@ GM_TOKEN=你的掘金token
 .venv\Scripts\python.exe -m data.migrate [--dry-run]
 ```
 
-## 八、目录结构
+## 八、数据库交付指南
+
+### 8.1 总体约定
+
+数据仓位于 `data/cache/`（本地运行态，git 忽略、不上传；交付/迁移时直接拷贝该目录）。存储介质为 Parquet（PyArrow），按年分片，全部表的主键为 `(date, symbol)`：
+
+| 约定 | 说明 |
+|---|---|
+| 主键 | `(date, symbol)`，无重复 |
+| date | 交易日，`datetime64[ns]` |
+| symbol | 掘金代码格式，如 `SHSE.600000` / `SZSE.000001`；覆盖沪深全 A（含历史退市股） |
+| 分片 | 每年一个 parquet 文件：`data/cache/meta/{分区}/{year}.parquet` |
+| 停牌日 | 行保留、行情列为空（NaN）、`is_suspended=True`，保证三分区对齐 |
+| 完整性 | 某天完整 ⟺ `coverage(d) ∪ no_data(d) ⊇` 当日有效股票集合 |
+
+### 8.2 bar 分区（行情 + 基础元数据）
+
+路径：`data/cache/meta/bar/{year}.parquet`
+
+| 列名 | 类型 | 含义 | 单位 |
+|---|---|---|---|
+| date | datetime64 | 交易日 | — |
+| symbol | str | 股票代码 | — |
+| open / high / low / close | float64 | 开 / 高 / 低 / 收价 | 元/股 |
+| volume | float64 | 成交量 | 股 |
+| amount | float64 | 成交额 | 元 |
+| upper_limit / lower_limit | float64 | 涨停价 / 跌停价 | 元/股 |
+| adj_factor | float64 | 复权因子 | — |
+| turn_rate | float64 | 换手率 | %（如 0.3672 = 0.37%） |
+| is_suspended | bool | 是否停牌 | — |
+| is_st | bool | 是否 ST / *ST | — |
+
+> 注意：`pre_close`（前收盘）不落盘，抓取时用于计算后丢弃；需要前收时可用前一交易日 `close` 代替，或从掘金接口重取。
+
+### 8.3 mv_basic 分区（市值 + 股本）
+
+路径：`data/cache/meta/mv_basic/{year}.parquet`
+
+| 列名 | 类型 | 含义 | 单位 |
+|---|---|---|---|
+| date / symbol | — | 交易日 / 代码 | — |
+| tot_mv | float64 | 总市值 | 元 |
+| a_mv | float64 | A 股流通市值 | 元 |
+| ttl_shr | float64 | 总股本 | 股 |
+| circ_shr | float64 | 流通股本 | 股 |
+| turnrate | float64 | 换手率 | % |
+
+### 8.4 valuation 分区（估值）
+
+路径：`data/cache/meta/valuation/{year}.parquet`
+
+| 列名 | 类型 | 含义 | 单位 |
+|---|---|---|---|
+| date / symbol | — | 交易日 / 代码 | — |
+| pe_ttm | float64 | 市盈率（TTM），亏损为负 | 倍 |
+| pe_ttm_cut | float64 | 扣非市盈率（TTM） | 倍 |
+| pb_mrq | float64 | 市净率（MRQ） | 倍 |
+| ps_ttm | float64 | 市销率（TTM） | 倍 |
+| pcf_ttm_oper | float64 | 经营现金流市盈率（TTM） | 倍 |
+| dy_ttm | float64 | 股息率（TTM） | %（如 3.15 = 3.15%） |
+
+### 8.5 coverage 覆盖账本
+
+路径：`data/cache/meta_coverage/{分区}/{year}.parquet`，列：`date, symbol, partition`。
+
+- coverage 是数据文件的纯投影（只登记"有行"），可随时全量重建：`python -m data.rebuild`；
+- 三个分区各自记账（partition 字段区分 bar / mv_basic / valuation）；
+- 完整性判定：当日 coverage 加上 no_data（确认无行情）必须覆盖当日有效股票集合。
+
+### 8.6 no_data / suspect 状态账本
+
+路径：`data/cache/status/`
+
+| 文件 | 列 | 说明 |
+|---|---|---|
+| no_data.parquet | date, symbol, reason, last_seen | 确认无数据的账本 |
+| suspect.parquet | date, symbol, attempts, status, reason, last_seen | 待复核，连续 3 次转 no_data |
+| task_status.json / task.log / scheduler.json | — | WebUI 运行态（任务状态 / 日志 / 调度配置） |
+
+no_data 的 `reason` 枚举：
+
+| reason | 含义 | 复核周期 |
+|---|---|---|
+| suspended | 确认停牌（状态接口 is_suspended=1） | 365 天 |
+| boundary | 上市日 / 退市日 / 代码变更边界 | 365 天 |
+| code_change | 批次状态正常但唯独无记录（代码变更特征） | 365 天 |
+| anomaly | 有行情却未返回（数据缺口/瞬时故障） | 30 天 |
+| unknown | 状态接口失败降级 | 30 天 |
+
+到期后记录被清除并重新进入缺失集合验证一次（自愈），防数据源后来补齐却永久漏抓。
+
+### 8.7 读取示例
+
+```python
+from datetime import date
+from data.meta_store import MetaStore
+
+store = MetaStore()
+
+# 读某分区全市场某区间（可加 symbols 过滤）
+bar = store.read_meta("bar", date(2024, 1, 1), date(2024, 12, 31))
+val = store.read_meta(
+    "valuation", date(2024, 1, 1), date(2024, 12, 31),
+    symbols=["SHSE.600000", "SZSE.000001"],
+)
+
+# 覆盖账本与统计
+cov = store.coverage("bar")          # DataFrame(date, symbol, partition)
+stats = store.stats("mv_basic")      # 覆盖天数 / 范围 / 行数
+```
+
+也可以直接用 pandas 读取物理文件：
+
+```python
+import pandas as pd
+df = pd.read_parquet("data/cache/meta/bar/2024.parquet")
+```
+
+> 旧版 bars / coverage 布局（`data/cache/bars/`、`data/cache/coverage/`）已废弃，仅 `data/migrate.py` 兼容迁移用；新交付一律使用 meta 三分区。
+
+### 8.8 交付与验收要点
+
+- 三分区行键严格一致：同日 `(date, symbol)` 集合三个分区完全相同；
+- 停牌日行保留、行情列 NaN、`is_suspended=True`；
+- 同一任务二次运行零重复抓取（幂等）；
+- 交付不经过 Git：数据仓被 `.gitignore` 排除，迁移数据直接拷贝 `data/cache/` 目录；
+- 验收命令：`.venv\Scripts\python.exe -m data.rebuild --dry-run --compare`（漂移应为 0）+ `.venv\Scripts\python.exe -m pytest -q`（22 项通过）。
+
+## 九、目录结构
 
 ```text
 gm-data-manager/
@@ -120,7 +248,7 @@ gm-data-manager/
 - 开发文档（PROJECT_PLAN / ENGINE_DESIGN / develop / todo 等）存放在本地 `开发文档/` 目录，不上传 GitHub；
 - `.venv`、`.idea`、`.pytest_cache` 均为本地环境，不入库。
 
-## 九、常见问题排查
+## 十、常见问题排查
 
 | 问题 | 处理 |
 |---|---|
