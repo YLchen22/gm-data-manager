@@ -1,19 +1,19 @@
 [project]
-name = "cyquant"
-version = "0.1.0"
-description = "CYQUANT 量化引擎平台：数据/回测/组合/风控/绩效；第一个策略 smart beta Top-N"
+name = "gm-data-manager"
+version = "1.0.0"
+description = "GM Data Manager：掘金行情数据落盘与同步服务（meta 三分区 parquet 仓库 + WebUI 任务调度）"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.26",
     "pandas>=1.5",
     "pyarrow>=15",
-    "pyyaml>=6",
     "python-dotenv>=1.0",
     "gm>=3.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+webui = ["streamlit>=1.30", "apscheduler>=3.10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

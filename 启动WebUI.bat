@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  CYQUANT Data Service WebUI Launcher
+rem  GM Data Manager WebUI Launcher
 rem  Double-click to start. Close this window to stop.
 rem ============================================================
 cd /d "%~dp0"
@@ -21,7 +21,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo  Starting CYQUANT Data Service WebUI ...
+echo  Starting GM Data Manager WebUI ...
 echo  Browser will open at http://localhost:8501
 echo  Close this window to stop the service.
 echo.

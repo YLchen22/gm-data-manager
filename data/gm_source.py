@@ -16,12 +16,21 @@ from gm.api import (
     get_trading_dates,
     history as gm_history,
     set_token,
+    stk_get_daily_basic_pt,
+    stk_get_daily_mktvalue_pt,
+    stk_get_daily_valuation_pt,
 )
 
 from core.contracts import DataSource
 
 _BAR_FIELDS = "symbol,open,high,low,close,volume,amount,pre_close,bob"
 _BAR_COLUMNS = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "pre_close"]
+
+# meta 分区抓取字段（与 data/meta_store.META_COLUMNS 对应）
+_P0_FIELDS = "symbol,pre_close,upper_limit,lower_limit,adj_factor,turn_rate,is_suspended,is_st"
+_MKTVALUE_FIELDS = "tot_mv,a_mv"
+_BASIC_FIELDS = "turnrate,ttl_shr,circ_shr"
+_VALUATION_FIELDS = "pe_ttm,pe_ttm_cut,pb_mrq,ps_ttm,pcf_ttm_oper,dy_ttm"
 
 
 def _to_date_series(s: pd.Series) -> pd.Series:
@@ -95,3 +104,65 @@ class GmDataSource(DataSource):
 
     def trading_dates(self, start: date, end: date) -> list[str]:
         return get_trading_dates(exchange="SHSE", start_date=start.isoformat(), end_date=end.isoformat())
+
+    # ---- 行情元数据按日截面（meta 三分区） ----
+    def meta_p0(self, d: date) -> pd.DataFrame:
+        """当日基准行键与 p0 字段：get_symbols 当日有效集合（含停牌股）。"""
+        df = get_symbols(
+            sec_type1=1010,
+            sec_type2=101001,
+            skip_suspended=False,
+            skip_st=False,
+            trade_date=d.isoformat(),
+            df=True,
+        )
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["date", "symbol"] + _P0_FIELDS.split(",")[1:])
+        cols = ["trade_date"] + _P0_FIELDS.split(",")
+        out = df[cols].copy()
+        out = out.rename(columns={"trade_date": "date"})
+        out["date"] = _to_date_series(out["date"])
+        return out
+
+    def meta_bar(self, d: date, symbols: Sequence[str]) -> pd.DataFrame:
+        """当日行情：只有有行情的股票返回行（停牌日由调用方以基准行键留空）。"""
+        if not symbols:
+            return pd.DataFrame(columns=_BAR_COLUMNS)
+        df = gm_history(
+            symbol=",".join(symbols),
+            frequency="1d",
+            start_time=d.isoformat(),
+            end_time=d.isoformat(),
+            fields=_BAR_FIELDS,
+            df=True,
+        )
+        if df is None or df.empty:
+            return pd.DataFrame(columns=_BAR_COLUMNS)
+        out = df.rename(columns={"bob": "date"})
+        out["date"] = _to_date_series(out["date"])
+        return out[_BAR_COLUMNS]
+
+    def meta_mv_basic(self, d: date, symbols: Sequence[str]) -> pd.DataFrame:
+        """当日市值+股本截面（mktvalue 与 basic 合并）。"""
+        syms = list(symbols) if symbols else self.instruments()["symbol"].tolist()
+        mv = stk_get_daily_mktvalue_pt(symbols=syms, fields=_MKTVALUE_FIELDS, trade_date=d.isoformat(), df=True)
+        bs = stk_get_daily_basic_pt(symbols=syms, fields=_BASIC_FIELDS, trade_date=d.isoformat(), df=True)
+        frames = [f for f in (mv, bs) if f is not None and not f.empty]
+        if not frames:
+            return pd.DataFrame(columns=["date", "symbol"] + _MKTVALUE_FIELDS.split(",") + _BASIC_FIELDS.split(","))
+        out = frames[0]
+        for f in frames[1:]:
+            out = out.merge(f.drop_duplicates(subset=["symbol", "trade_date"]), on=["symbol", "trade_date"], how="left")
+        out = out.rename(columns={"trade_date": "date"})
+        out["date"] = _to_date_series(out["date"])
+        return out
+
+    def meta_valuation(self, d: date, symbols: Sequence[str]) -> pd.DataFrame:
+        """当日估值截面。"""
+        syms = list(symbols) if symbols else self.instruments()["symbol"].tolist()
+        df = stk_get_daily_valuation_pt(symbols=syms, fields=_VALUATION_FIELDS, trade_date=d.isoformat(), df=True)
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["date", "symbol"] + _VALUATION_FIELDS.split(","))
+        out = df.rename(columns={"trade_date": "date"})
+        out["date"] = _to_date_series(out["date"])
+        return out

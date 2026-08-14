@@ -1,8 +1,0 @@
-# 风控参数（第一层硬性自动风控，默认锁定；数值全部待标定）
-max_drawdown_hard: 0.25          # 最大回撤硬线 → 触发半仓
-max_drawdown_clear: 0.35         # 清仓复盘线
-daily_loss_circuit_breaker: 0.05 # 单日亏损熔断阈值
-risk_multiplier_after_breaker: 0.5
-max_single_stock_weight: 0.10    # 单票上限（待标定）
-max_single_industry_weight: 0.20 # 行业权重上限（基准版，待标定）
-max_industry_risk_contribution: 0.40  # 行业风险贡献硬性地板（待标定）

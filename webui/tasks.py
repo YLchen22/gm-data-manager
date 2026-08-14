@@ -119,18 +119,16 @@ def _run_task(
         _write(cur)
 
     try:
-        if task_name == "市场扫描":
-            from data.sweep import sweep
+        if task_name == "重建覆盖清单":
+            from data.rebuild import rebuild_meta_coverage
 
-            result = sweep(start, end, max_days=max_days, progress_cb=cb, stop_event=stop_event.is_set)
-        elif task_name == "重建覆盖清单":
-            from data.rebuild import rebuild_coverage
-
-            result = rebuild_coverage(asset=asset, progress_cb=cb, stop_event=stop_event.is_set)
+            result = rebuild_meta_coverage(progress_cb=cb, stop_event=stop_event.is_set)
         else:
-            from data.incremental import align
+            from data.meta_fetch import align_meta
 
-            result = align(start, end, max_days=max_days, progress_cb=cb, stop_event=stop_event.is_set)
+            result = align_meta(
+                start, end, max_days=max_days, progress_cb=cb, stop_event=stop_event.is_set
+            )
         cur = get_status()
         cur.update(
             {

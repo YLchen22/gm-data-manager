@@ -1,26 +1,20 @@
-# 待办（当前迭代：数据服务 v0.9 增强 + Phase 1 引擎核心 v0.1）
+# 待办（当前迭代：GM Data Manager v1.0 · 转型完成）
 
-主线（数据服务 v0.9，先做；与首次对齐回补并行）：
-- [x] coverage 重建工具：data/rebuild.py（CLI --asset/--dry-run/--compare；WebUI"重建覆盖清单"按钮）；清空前实测漂移=0（11 年 / 673.9 万行）
-- [x] 空补记账：no_data 独立账本 + 分类准入（停牌/边界/代码变更[批次接口正常]立即记账，与停牌同待遇；异常/未知 3 次后记账）+ 复核（anomaly/unknown 30 天，其余 365 天）
-- [x] 命令行动态输出统一：全量/增量 print 与任务日志改三段式（待补 → 已入库 + 空补 + 待复核），去掉"失败"字样
-- [x] 修复"当日未完成交易日被误记空补/停牌"漏洞：_completed_days 在 15:30 前剔除今天；结算后当天拉不到也不记账、留待次日重试；已清理 08-06 误记的 5205 条 no_data
-- [x] 收盘时点改为 18:00；rebuild 内置异常记账阈值保险检查（audit_no_data：单日 anomaly > max(50, valid×1%) 判定存疑并清除重抓）；08-05 前数据核对：漂移 0、无存疑天数
-- [ ] 用户场景验证：重启 WebUI → 点"重建覆盖清单"（应生成空清单）→ 手动触发市场扫描/截面增量 → 确认"尚未对齐"收敛、空补计入后不再重复抓取
-- [x] 数据服务 v0.9 实现总结已移入 develop.md（含 --compare 漂移结果）
+## 已完成（v1.0 实现）
 
-主线（引擎核心，先做）：
-- [ ] 在 WebUI 从零完成首次数据对齐：存量已清空（回收站可恢复），重启 WebUI 后触发市场扫描，新股票池 5542 只全历史（含退市股）一次抓齐；再确认截面增量日常运行
-- [ ] 回测引擎最小可用：事件驱动循环（T 日信号 → T+1 撮合）、T+1 卖出约束、涨跌停不可成交、停牌跳过、整手取整、成本模型接入
-- [ ] 组合构建框架：Top-N PortfolioBuilder + 约束（个股/行业上限、换手上限）+ 整手近似
-- [ ] 风控框架：硬风控（回撤硬线/单日熔断/暴露上限）+ 风险乘数
-- [ ] 绩效模块基础：净值/收益/最大回撤/换手率
-- [ ] 自研引擎与掘金回测 A/B 对比（偏差可解释）
-- [ ] 成本敏感性报告
+- [x] 转型决策：项目改为 gm data manager，只保留数据库落盘与同步服务
+- [x] 删除策略研发：backtest / execution / factors / model / portfolio / risk、STRATEGY_BLUEPRINT.md、config/（策略五 YAML + loader）、core 策略契约与模型、旧取数工具（cache/hub/universe/verify）、策略测试
+- [x] 保留并梳理数据服务：data/（asset / gm_source / store / meta_store / incremental / meta_fetch / rebuild / migrate）+ webui/ + core 最小数据契约
+- [x] 元数据与文档重写：pyproject 更名 gm-data-manager v1.0.0、WebUI 标题/调度路径、OUTLINE / PROJECT_PLAN / ENGINE_DESIGN / develop / todo
+- [x] 测试与入库核对：pytest 22 项通过；data/cache 与 .env 确认不入库（数据仓不推送）
+
+## 待办
+
+- [ ] 用户场景验证：启动 WebUI → 点「重建覆盖清单」→ 手动触发「截面数据任务」→ 确认三分区逐日收敛、二次运行零重复
+- [ ] 数据完整性质检：2016→今三分区行键对齐抽查 + no_data 审计无存疑天数（rebuild --compare --dry-run）
+- [ ] 自动调度实跑一轮并核对 task.log（工作日定时截面增量）
+- [ ] 后续增强：指数 / ETF 资产类别接入（asset.py 已预留 AssetClass 枚举）
+- [ ] 后续增强：只读查询 / 数据导出 API（MetaStore 对外暴露）
 - [ ] 完成情况总结移入 develop.md
 
-后置/并行（不阻塞主线）：
-- [ ] 单特征 rank IC 分析脚本框架（Phase 3 用到；研究准备阶段可先写）
-
-规则：todo.md 只保留最新待办；完成一个版本迭代后，将完成情况总结移入 develop.md。
-引擎缺口 backlog：研究/开发中发现的引擎缺口追加到"后置/并行"区，按小版本迭代吸收。
+规则：todo.md 只保留最新待办；完成一个版本迭代后，将完成情况总结移入 develop.md。数据服务缺口 backlog 追加到"待办"区，按小版本迭代吸收。

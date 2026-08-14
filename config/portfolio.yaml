@@ -1,7 +1,0 @@
-# 组合构建参数（数值全部待标定）
-top_n: 20                        # 持仓数
-min_top_n: 15
-max_top_n: 30
-turnover_limit: 0.20             # 单期换手上限
-lot_size: 100                    # 整手股数
-prediction_horizon: 10           # 预测窗口 h（候选 5/10/20）

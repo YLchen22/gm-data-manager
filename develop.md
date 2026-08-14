@@ -1,4 +1,37 @@
 # 开发日志
+## GM Data Manager v1.0：从量化引擎转型为纯数据服务（2026-08-14）
+- 决策：用户拍板把 cyquant 改为 gm data manager，只保留数据库落盘和同步服务，去掉策略研发环节。
+- 删除（策略研发，均为空骨架/未投产代码）：backtest/、execution/、factors/、model/、portfolio/、risk/、
+  STRATEGY_BLUEPRINT.md、config/（costs/universe/risk/alerts/portfolio 五 YAML + loader.py）、
+  core 策略契约与模型（Strategy/CostModel/RiskManager/ExecutionAdapter、Order/Cost/Position/
+  PortfolioState/TargetPortfolio/RiskDecision/ExecutionReport/StrategyContext）、tests/test_contracts.py；
+  旧数据取数工具 data/cache.py、data/hub.py、data/universe.py、data/verify.py 一并移除
+  （其依赖的 config/策略池已不存在，verify 抽样的旧 bars 布局也已废弃）。
+- 保留（数据服务）：data/asset.py（资产类别/静态表/有效性）、gm_source.py（掘金数据源）、
+  store.py + meta_store.py（落盘仓库）、incremental.py（no_data/suspect 账本与审计）、
+  meta_fetch.py（三分区截面同步）、rebuild.py（覆盖重建）、migrate.py（旧布局迁移）；
+  webui/（Streamlit + APScheduler 任务调度）；core/ 仅保留 DataSource 协议与 Bar/Event 模型。
+- 元数据变更：pyproject.toml 更名 gm-data-manager v1.0.0（移除 pyyaml，新增 webui 可选依赖
+  streamlit/apscheduler）；WebUI 标题改为 GM Data Manager；调度配置文件路径 config/scheduler.json
+  → data/cache/status/scheduler.json（运行态数据不入库）；启动WebUI.bat 文案更新。
+- 测试：tests/test_smoke.py 重写为数据服务导入冒烟（原策略契约冒烟删除），pytest 22 项通过（mock、无网络）。
+- 文档：OUTLINE.md / PROJECT_PLAN.md / ENGINE_DESIGN.md 重写为数据服务口径；todo.md 重排为数据服务迭代；
+  历史开发日志保留供追溯。
+- 入库核对：git 复核 data/cache（parquet 数据仓）与 .env（掘金 token）均未纳入版本控制，GitHub 推送不含数据。
+
+## 数据服务 v0.9.4：meta 三分区框架（2026-08-06）
+- 方案反复后由用户拍板并重置代码：放弃"bars 独立 + meta 四分区 + 两阶段串联"的中间方案，改为 meta 框架下三分区、单任务按日推进。
+- 存储：`data/cache/meta/{bar,mv_basic,valuation}/{year}.parquet`，行键统一 (date, symbol)，含停牌日（行情列留空、is_suspended=1）；`meta_coverage/` 独立账本。
+  - bar = OHLCV/amount/pre_close + upper/lower_limit/adj_factor/turn_rate/is_suspended/is_st
+  - mv_basic = tot_mv/a_mv + turnrate/ttl_shr/circ_shr
+  - valuation = pe_ttm/pe_ttm_cut/pb_mrq/ps_ttm/pcf_ttm_oper/dy_ttm
+- 抓取：align_meta 单任务按交易日推进——每天 get_symbols 定基准行键（当日有效集合，含停牌），行情/市值股本/估值三分区对齐到基准行键后落盘；一次性跑完 2016→今即满足全部数据需求，之后每日增量一次。
+- 对齐与完整性：三分区行键严格一致（实测 2024-01-02/03 每日 5096 行完全对齐）；停牌日三分区同步留行；coverage = coverage ∪ no_data ⊇ 当日有效集合；get_symbols 未返回（代码变更如 302132）与分区接口少返回均记 boundary 365 天复核（接口少返回用 NaN 补齐保对齐，同时记账防永久漏抓）。
+- 清理：删除 data/sweep.py、data/fetch.py、incremental.align_by_stock 及辅助函数（市场扫描逐股全量彻底移除）；旧 bars 目录废弃（用户清空重跑）。
+- WebUI：按钮精简为「截面数据任务（全量/增量）」+「重建覆盖清单」+停止；进度条适配 meta/rebuild_meta 模式；数据详情显示三分区缺失概览；调度任务同名。
+- 命令行动态输出：align_meta 逐日打印（待补分区/入库行数/边界条数）、rebuild 逐分区/年份打印。
+- 测试：meta_store/meta_fetch/rebuild 测试重写（mock 数据源无网络、账本路径 monkeypatch 隔离），pytest 24 项通过；真实 API 冒烟：三分区对齐、停牌日留空行、二次运行零重复（checked_days=0）。
+- 旧格式数据已清空（回收站可恢复）；待用户在 WebUI 按场景验证。
 
 ## 数据服务 v0.9.1：当日未完成交易日保护（2026-08-06）
 - 用户发现漏洞：早盘跑增量时当天行情返回为空，被分类为"异常/停牌"记入 no_data（实测 08-06 已误记 5205 条），之后 30 天不会再抓 → 当天真实行情漏抓。

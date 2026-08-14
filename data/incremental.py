@@ -1,10 +1,9 @@
-"""数据对齐：市场全量（按股票）与截面增量（按天）。
+"""数据对齐：no_data 账本 / 审计 / 旧 bars 截面增量（保留供兼容）。
 
-两种任务都遵循"先扫描本地覆盖，只补缺失，避免重复抓取"：
-- 市场全量（align_by_stock）：按股票逐个对齐——每只股票计算 2016 至今缺失的日期区间，
-  合并连续区间后整段拉取（股票维度完整性）；
-- 截面增量（align）：按交易日对齐——每天计算有效性集合（已上市未退市）− 已覆盖集合，
-  拉取该日缺失的股票（日期维度完整性）。
+meta 三分区任务见 data/meta_fetch.py；本模块保留：
+- no_data 独立账本与复核（meta_fetch 复用记账函数）；
+- audit_no_data 保险检查（rebuild 复用）；
+- align() 旧 bars 截面增量（v0.9.1 兼容，WebUI 已改走 meta_fetch）。
 
 完整性口径：
 - coverage 清单 = bars 的纯投影（date, symbol），只登记"有行情"；
@@ -26,7 +25,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from bisect import bisect_left, bisect_right
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Callable
@@ -195,11 +193,11 @@ def audit_no_data(
       绝不静默漏抓；
     - dry_run=True：只报告，不修改。
     """
-    if assets is None or trading_days is None:
-        assets, trading_days, _, _, _ = _plan(start, end)
     nd = _load_no_data()
     if nd.empty:
         return {"flagged_days": [], "removed_rows": 0, "details": []}
+    if assets is None or trading_days is None:
+        assets, trading_days, _, _, _ = _plan(start, end)
     nd = nd.copy()
     nd["d"] = pd.to_datetime(nd["date"]).dt.date
     anomaly = nd[nd["reason"].isin(["anomaly", "unknown"])]
@@ -365,45 +363,6 @@ def _classify_unreturned(
     return suspended, boundary, anomaly, nostatus, True
 
 
-def _classify_unreturned_days(
-    assets: pd.DataFrame, sym: str, days: list[date]
-) -> tuple[list[date], list[date], list[date], list[date], bool]:
-    """股票模式：某股票缺失交易日分类 → (停牌日, 边界日, 异常日, 无状态日, 接口可用)。"""
-    if not days:
-        return [], [], [], [], True
-    row = assets.set_index("symbol").loc[sym]
-    boundary: list[date] = []
-    rest: list[date] = []
-    for d in days:
-        if row["listed_date"] == d or row["delisted_date"] == d:
-            boundary.append(d)
-        else:
-            rest.append(d)
-    if not rest:
-        return [], boundary, [], [], True
-    try:
-        hi = get_history_instruments(
-            symbols=sym, start_date=rest[0].isoformat(), end_date=rest[-1].isoformat(), df=True
-        )
-    except Exception:
-        return [], [], [], list(days), False
-    if hi is None or hi.empty:
-        return [], [], [], list(days), False
-    status_map = dict(zip(pd.to_datetime(hi["trade_date"]).dt.date, hi["is_suspended"]))
-    suspended: list[date] = []
-    anomaly: list[date] = []
-    nostatus: list[date] = []
-    for d in rest:
-        st = status_map.get(d)
-        if st == 1:
-            suspended.append(d)
-        elif st == 0:
-            anomaly.append(d)
-        else:
-            nostatus.append(d)
-    return suspended, boundary, anomaly, nostatus, True
-
-
 def scan_missing(start: date, end: date) -> list[tuple[date, set[str]]]:
     """只扫描本地覆盖，不拉取：返回 [(日期, 缺失 symbol 集合)]。
 
@@ -411,58 +370,6 @@ def scan_missing(start: date, end: date) -> list[tuple[date, set[str]]]:
     """
     assets, trading_days, covered_by_date, blocked_by_date, _ = _plan(start, end)
     return _missing_blocks(assets, trading_days, covered_by_date, blocked_by_date)
-
-
-def _merge_trading_ranges(missing: list[date], trading_days: list[date]) -> list[tuple[date, date]]:
-    """把缺失日期按"交易日连续"合并成区间段。"""
-    idx = {d: i for i, d in enumerate(trading_days)}
-    missing = sorted(missing)
-    ranges: list[tuple[date, date]] = []
-    seg_start = seg_end = missing[0]
-    for d in missing[1:]:
-        if idx.get(d) == idx.get(seg_end, -1) + 1:
-            seg_end = d
-        else:
-            ranges.append((seg_start, seg_end))
-            seg_start = seg_end = d
-    ranges.append((seg_start, seg_end))
-    return ranges
-
-
-def _missing_ranges_by_stock(
-    store: Store, assets: pd.DataFrame, trading_days: list[date], start: date, end: date
-) -> list[tuple[str, list[tuple[date, date]]]]:
-    """每只股票缺失的日期区间（coverage ∪ no_data 之外）。"""
-    _review_no_data()
-    covered = store.coverage("stock")
-    covered_by_symbol: dict[str, set[date]] = {}
-    if not covered.empty:
-        for sym, g in covered.groupby("symbol"):
-            covered_by_symbol[sym] = set(g["date"].dt.date)
-    blocked = _no_data_blocked()
-
-    result: list[tuple[str, list[tuple[date, date]]]] = []
-    for sym, listed, delisted in assets[["symbol", "listed_date", "delisted_date"]].itertuples(index=False):
-        lo = bisect_left(trading_days, max(listed, start))
-        hi = bisect_right(trading_days, min(delisted, end))
-        valid = trading_days[lo:hi]
-        if not valid:
-            continue
-        have = covered_by_symbol.get(sym, set())
-        missing = [d for d in valid if d not in have and (d, sym) not in blocked]
-        if not missing:
-            continue
-        result.append((sym, _merge_trading_ranges(missing, trading_days)))
-    return result
-
-
-def scan_missing_stocks(start: date, end: date) -> list[tuple[str, list[tuple[date, date]]]]:
-    """只扫描本地覆盖，不拉取：返回 [(股票, 缺失日期区间段)]，供市场全量任务使用。"""
-    store = Store()
-    source = GmDataSource()
-    assets = load_assets(source)
-    trading_days = _completed_days([date.fromisoformat(d) for d in source.trading_dates(start, end)])
-    return _missing_ranges_by_stock(store, assets, trading_days, start, end)
 
 
 def align(
@@ -569,96 +476,6 @@ def align(
         "failed": len(failed),
         "stopped": stopped,
         "mode": "section",
-    }
-
-
-def align_by_stock(
-    start: date,
-    end: date,
-    progress_cb: ProgressCB | None = None,
-    stop_event: StopCheck | None = None,
-) -> dict:
-    """市场全量：按股票逐个对齐（每只股票 2016 至今的缺失区间）。"""
-    store = Store()
-    source = GmDataSource()
-    assets = load_assets(source)
-    trading_days = _completed_days([date.fromisoformat(d) for d in source.trading_dates(start, end)])
-    jobs = _missing_ranges_by_stock(store, assets, trading_days, start, end)
-    total = len(jobs)
-    filled_rows = 0
-    no_data_rows = 0
-    failed: list[tuple[date, str, str]] = []
-    stopped = False
-    for idx, (sym, ranges) in enumerate(jobs):
-        if stop_event is not None and stop_event():
-            stopped = True
-            break
-        sym_filled = 0
-        sym_no_data = 0
-        sym_retry = 0
-        for rs, re_ in ranges:
-            df = source.bars([sym], rs, re_)
-            got_days = set(pd.to_datetime(df["date"]).dt.date) if df is not None and not df.empty else set()
-            if got_days:
-                store.write_bars("stock", df)
-                store.write_coverage("stock", df)
-                sym_filled += len(df)
-            unfilled = [d for d in trading_days if rs <= d <= re_ and d not in got_days]
-            today = date.today()
-            pending = [d for d in unfilled if d >= today]  # 当日未结算：不记账，留待下次
-            unfilled = [d for d in unfilled if d < today]
-            if unfilled:
-                susp_days, boundary_days, anomaly_days, nostatus_days, api_ok = _classify_unreturned_days(
-                    assets, sym, unfilled
-                )
-                if api_ok:
-                    _mark_no_data([(d, sym) for d in susp_days], "suspended")
-                    _mark_no_data([(d, sym) for d in boundary_days], "boundary")
-                    _mark_no_data([(d, sym) for d in nostatus_days], "code_change")
-                    failed.extend((d, sym, "anomaly") for d in anomaly_days)
-                else:
-                    failed.extend((d, sym, "unknown") for d in unfilled)
-                sym_no_data += len(susp_days) + len(boundary_days) + len(nostatus_days)
-                sym_retry += len(anomaly_days) if api_ok else len(unfilled)
-        filled_rows += sym_filled
-        no_data_rows += sym_no_data
-        if progress_cb is not None:
-            progress_cb(
-                {
-                    "mode": "stock",
-                    "phase": "fetch",
-                    "current": sym,
-                    "done_days": idx + 1,
-                    "total_days": total,
-                    "missing_count": len(ranges),
-                    "filled_count": sym_filled,
-                    "no_data_count": sym_no_data,
-                    "retry_count": sym_retry,
-                    "filled_rows": filled_rows,
-                    "failed_count": len(failed),
-                    "percent": (idx + 1) / total if total else 1.0,
-                }
-            )
-        print(
-            f"[stock] {idx + 1}/{total} {sym} 缺失 {len(ranges)} 段，已入库 {sym_filled} 行，"
-            f"空补 {sym_no_data}，待复核 {sym_retry}",
-            flush=True,
-        )
-
-    if failed:
-        _update_suspect(failed)
-    print(
-        f"[stock] 完成：处理 {total} 只股票，已入库 {filled_rows} 行，空补 {no_data_rows} 条，"
-        f"待复核 {len(failed)} 条",
-        flush=True,
-    )
-    return {
-        "checked_days": total,
-        "filled_rows": filled_rows,
-        "no_data": no_data_rows,
-        "failed": len(failed),
-        "stopped": stopped,
-        "mode": "stock",
     }
 
 

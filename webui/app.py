@@ -1,9 +1,9 @@
-"""CYQUANT 数据服务 WebUI（Streamlit + APScheduler）。
+"""GM Data Manager WebUI（Streamlit + APScheduler）。
 
 功能：
-- 市场扫描 / 截面增量：按钮触发，动态进度条（fragment 自动轮询）；
+- 截面数据任务（全量/增量）：按钮触发，动态进度条（fragment 自动轮询）；
 - 数据状态：覆盖天数、范围、未对齐统计（先扫描本地，避免重复抓取）；
-- 自动调度：工作日定时截面增量（配置持久化到 config/scheduler.json）。
+- 自动调度：工作日定时截面增量（配置持久化到 data/cache/status/scheduler.json）。
 
 启动：streamlit run webui/app.py
 """
@@ -25,16 +25,20 @@ load_dotenv(PROJECT_ROOT / ".env")
 from webui.tasks import get_status, is_running, start_task, stop_task  # noqa: E402
 
 ASSET = "stock"
-SCHEDULE_PATH = PROJECT_ROOT / "config" / "scheduler.json"
+SCHEDULE_PATH = PROJECT_ROOT / "data" / "cache" / "status" / "scheduler.json"
 
 
 # ---------- 数据状态（缓存 10 分钟；统计在后台并行 fragment 中计算，不阻塞页面） ----------
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data_overview() -> dict:
-    """一次性统计：覆盖口径 + 尚未对齐口径（单次扫描，避免重复 gm 调用与覆盖读取）。"""
-    from data.incremental import scan_missing_summary
+    """一次性统计：meta 三分区覆盖 + 尚未对齐口径。"""
+    from data.meta_fetch import scan_missing_meta_summary
+    from data.meta_store import META_SUBSETS, MetaStore
 
-    return scan_missing_summary(date(2016, 1, 1), date.today())
+    overview = scan_missing_meta_summary(date(2016, 1, 1), date.today())
+    store = MetaStore()
+    overview["cells"] = {p: len(store.coverage(p)) for p in META_SUBSETS}
+    return overview
 
 
 # ---------- 调度（APScheduler 单例） ----------
@@ -53,7 +57,7 @@ def _get_scheduler():
 
 
 def _run_scheduled() -> None:
-    start_task("截面增量", ASSET, date(2016, 1, 1), date.today(), max_days=0)
+    start_task("截面数据", ASSET, date(2016, 1, 1), date.today(), max_days=0)
 
 
 def apply_schedule(enabled: bool, hour: int, minute: int) -> None:
@@ -87,15 +91,16 @@ def load_schedule() -> dict:
 
 
 def save_schedule(data: dict) -> None:
+    SCHEDULE_PATH.parent.mkdir(parents=True, exist_ok=True)
     SCHEDULE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ---------- 页面 ----------
-st.set_page_config(page_title="CYQUANT 数据服务", page_icon="📊", layout="wide")
-st.title("CYQUANT 数据服务")
+st.set_page_config(page_title="GM Data Manager", page_icon="📊", layout="wide")
+st.title("GM Data Manager")
 st.caption(
     f"资产类别：{ASSET} · 数据范围：2016-01-01 至今 · "
-    "股票池：沪深全 A 股（主板/创业板/科创板，含全部历史退市股），先扫描本地只补缺失"
+    "覆盖：沪深全 A 股（主板/创业板/科创板，含全部历史退市股），先扫描本地只补缺失"
 )
 
 running = is_running()
@@ -110,11 +115,8 @@ with st.sidebar:
     else:
         st.info("空闲")
 
-    if st.button("🚀 市场扫描（全量对齐）", disabled=running, use_container_width=True):
-        r = start_task("市场扫描", ASSET, date(2016, 1, 1), date.today(), max_days=0)
-        st.toast("已启动" if r.get("ok") else f"启动失败：{r.get('error')}")
-    if st.button("⚡ 截面增量（日常）", disabled=running, use_container_width=True):
-        r = start_task("截面增量", ASSET, date(2016, 1, 1), date.today(), max_days=0)
+    if st.button("🚀 截面数据任务（全量/增量）", disabled=running, use_container_width=True):
+        r = start_task("截面数据", ASSET, date(2016, 1, 1), date.today(), max_days=0)
         st.toast("已启动" if r.get("ok") else f"启动失败：{r.get('error')}")
     if st.button("🗂 重建覆盖清单", disabled=running, use_container_width=True):
         r = start_task("重建覆盖清单", ASSET, date(2016, 1, 1), date.today(), max_days=0)
@@ -126,7 +128,7 @@ with st.sidebar:
     st.divider()
     st.header("自动调度")
     settings = load_schedule()
-    enabled = st.toggle("启用工作日自动截面增量", value=bool(settings["enabled"]))
+    enabled = st.toggle("启用工作日自动截面数据", value=bool(settings["enabled"]))
     t = st.time_input("运行时间", dtime(settings["hour"], settings["minute"]))
     if st.button("保存调度设置", use_container_width=True):
         save_schedule({"enabled": bool(enabled), "hour": t.hour, "minute": t.minute})
@@ -145,17 +147,21 @@ def stats_section() -> None:
     except Exception as e:
         st.error(f"数据状态加载失败：{e}")
         return
+    cells = o.get("cells") or {}
+    total_cells = sum(cells.values())
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("覆盖交易日", f"{o.get('covered_days', 0)} 天")
-    c2.metric("数据范围", f"{o.get('first_covered_day')} ~ {o.get('last_covered_day')}")
-    c3.metric("覆盖数据量", f"{o.get('covered_cells', 0):,} 行")
-    c4.metric("尚未对齐", f"{o.get('stocks', 0)} 只 / {o.get('rows', 0):,} 行")
-    if o.get("first_missing_day"):
+    c1.metric("覆盖交易日", f"{o.get('meta_days', 0)} 天（缺失）")
+    c2.metric("数据范围", f"{o.get('meta_first_missing_day') or '已全部对齐'}")
+    c3.metric("覆盖数据量", f"{total_cells:,} 行")
+    c4.metric("待补分区", f"{o.get('meta_rows', 0):,} 子集天")
+    if o.get("meta_first_missing_day"):
         st.caption(
-            f"未对齐：{o.get('stocks', 0)} 只股票（截面口径 {o.get('days', 0)} 天 / "
-            f"{o.get('rows', 0):,} 行）· 最早缺失截面 {o.get('first_missing_day')}"
+            f"未对齐：{o.get('meta_rows', 0)} 个子集天（bar/mv_basic/valuation 按日对齐）· "
+            f"最早缺失 {o.get('meta_first_missing_day')} · 待补 {', '.join(o.get('meta_subsets', []) or [])}"
             "（点击上方任务按钮开始补齐）"
         )
+    else:
+        st.caption("三个分区（bar / mv_basic / valuation）已全部对齐")
     if st.button("刷新统计", width="content"):
         load_data_overview.clear()
         st.rerun(scope="fragment")
@@ -177,34 +183,28 @@ def show_progress() -> None:
             p2.metric("当前年份", s.get("current") or "-")
             p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 年")
             p4.metric("已生成行数", f"{s.get('filled_rows', 0):,}")
-        elif s.get("mode") == "stock":
-            p2.metric("当前股票", s.get("current") or "-")
-            p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 只")
-            p4.metric("已入库行数", f"{s.get('filled_rows', 0):,}")
+        elif s.get("mode") == "rebuild_meta":
+            p2.metric("当前分区/年份", s.get("current") or "-")
+            p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 份")
+            p4.metric("已投影行数", f"{s.get('filled_rows', 0):,}")
         else:
             p2.metric("当前日期", s.get("current") or "-")
             p3.metric("进度", f"{s.get('done_days', 0)} / {s.get('total_days', 0)} 天")
             p4.metric("已入库行数", f"{s.get('filled_rows', 0):,}")
-        if s.get("mode") == "section":
+        if s.get("mode") == "meta":
             if s.get("phase") == "scan":
                 st.caption(
-                    f"正在扫描本地覆盖，计算缺失：{s.get('done_days', 0)} / {s.get('total_days', 0)} 天"
+                    f"正在扫描三分区覆盖：{s.get('done_days', 0)} / {s.get('total_days', 0)} 天"
                     "（先扫本地、只补缺失）"
                 )
             else:
                 missing = s.get("missing_count", 0)
                 filled = s.get("filled_count", 0)
                 no_data = s.get("no_data_count", 0)
-                retry = s.get("retry_count", 0)
                 st.caption(
-                    f"当日：待补 {missing} → 已入库 {filled} · 空补 {no_data} · 待复核 {retry}"
-                    "（空补=确认停牌/边界[退市日·上市日·代码变更]；待复核自动重试，异常 30 天 / 其余 365 天复核）"
+                    f"当日：{s.get('current') or '-'} · 待补 {missing} 分区 → 已入库 {filled} · 边界 {no_data}"
+                    "（边界=代码变更/上市退市日，365 天复核）"
                 )
-        elif s.get("mode") == "stock" and s.get("failed_count"):
-            st.caption(
-                f"本股已入库 {s.get('filled_count', 0)} 行 · 空补 {s.get('no_data_count', 0)} · "
-                f"待复核 {s.get('retry_count', 0)}（自动重试，异常 30 天 / 其余 365 天复核）"
-            )
         if st.button("⏹ 停止任务", use_container_width=False):
             stop_task()
             st.toast("已发送停止指令，任务将在当前步骤结束后停止")
